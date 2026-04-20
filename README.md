@@ -1,167 +1,137 @@
-# Polymarket + Kalshi Arbitrage Bot
+# Polymarket Arbitrage Bot
 
-<div align="center">
+An async Python trading bot for Polymarket binary markets with:
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/Status-Active-brightgreen.svg)
-![Platforms](https://img.shields.io/badge/Platforms-Polymarket%20%7C%20Kalshi-orange.svg)
+- Polymarket market discovery and order book polling
+- Bundle arbitrage detection (`YES + NO` mispricing)
+- Optional market-making signals
+- Risk management, execution, and portfolio tracking
+- A FastAPI + WebSocket dashboard
+- Optional Kalshi market loading and text-based market matching
+- Dry-run simulation and backtesting modes
 
-**Cross-platform arbitrage detection between Polymarket and Kalshi prediction markets**
+Important: the repository contains cross-platform matching and cross-platform arbitrage logic, but it does **not** currently wire automated Polymarket <-> Kalshi execution into the live bot loop.
 
-[Features](#-features) • [Demo](#-demo) • [Quick Start](#-quick-start) • [Dashboard](#-live-dashboard) • [Configuration](#%EF%B8%8F-configuration)
+## Current Scope
+This repo currently supports these capabilities:
 
-**Author: [ImMike](https://github.com/ImMike)**
+| Capability | Status | Notes |
+| --- | --- | --- |
+| Polymarket market discovery from Gamma | Implemented | Scans active markets and caches token IDs |
+| Polymarket order book ingestion | Implemented | Main live path uses REST polling, not WebSocket |
+| Bundle arbitrage detection | Implemented | `core/arb_engine.py` |
+| Market-making signal generation | Implemented | `core/arb_engine.py` |
+| Risk checks and kill switch | Implemented | `core/risk_manager.py` |
+| Execution queue and order timeout handling | Implemented | `core/execution.py` |
+| Dry-run order simulation and fill simulation | Implemented | `polymarket_client/api.py`, `main.py` |
+| Dashboard API and WebSocket UI | Implemented | `dashboard/server.py` |
+| Kalshi market loading | Implemented | `kalshi_client/api.py` |
+| Polymarket/Kalshi market matching | Implemented | `core/cross_platform_arb.py` |
+| Cross-platform opportunity engine | Implemented in isolation | Logic exists but is not called from the live trading loop |
+| Automated Kalshi execution | Not implemented | Kalshi client is read-only market data in this repo |
+| Polymarket WebSocket order book path | Stubbed | `_connect_websocket()` exists but is not used by the main stream path |
 
-</div>
+## Architecture
+```mermaid
+flowchart TD
+    A[config.yaml + env] --> B[load_config]
+    B --> C[TradingBot or TradingBotWithDashboard]
+    C --> D[PolymarketClient]
+    C --> E[Portfolio]
+    C --> F[RiskManager]
+    C --> G[ExecutionEngine]
+    C --> H[ArbEngine]
+    C --> I[DataFeed]
 
----
+    I --> J[list_markets / get_market]
+    I --> K[stream_orderbook]
+    I --> L[get_positions]
+    K --> M[MarketState]
+    L --> M
+    J --> M
 
-## 🎬 Demo
+    M --> H
+    H --> N[Signal]
+    N --> G
+    G --> D
+    G --> E
+    G --> F
 
-### 🎥 Video Demo
+    C --> O[DashboardIntegration]
+    O --> P[FastAPI + WebSocket dashboard]
 
-[**▶️ Watch Demo Video (Click to Download)**](https://github.com/ImMike/polymarket-arbitrage/raw/main/Polymarket-Arb-clip.mp4)
-
-*Watch the bot in action - scanning 5,000+ markets and finding opportunities in real-time*
-
-### Screenshots
-
-<div align="center">
-
-#### 📊 Real Market Data Mode
-*Scanning 5,000+ live Polymarket markets*
-
-![Live Data Dashboard](polymarket-live-data.png)
-
-#### 🧪 Simulation Mode  
-*Testing with simulated opportunities - 99.6% win rate, $573 profit*
-
-![Simulated Data Dashboard](simulated-market-data.png)
-
-</div>
-
----
-
-## 🎯 Features
-
-- **🔀 Cross-Platform Arbitrage** - Detects price differences between Polymarket and Kalshi for the same prediction
-- **🔍 Bundle Arbitrage Detection** - Identifies when YES + NO prices don't sum to ~$1.00
-- **📊 Market Making** - Captures spreads by placing competitive bid/ask orders  
-- **🛡️ Risk Management** - Position limits, loss limits, kill switch
-- **📈 Live Dashboard** - Real-time web UI showing opportunities and bot activity
-- **🔄 Dual Data Modes** - Switch between real market data and simulation
-- **💰 Fee Accounting** - Realistic edge calculations including fees & gas costs
-- **📝 Comprehensive Logging** - Detailed logs for trades, opportunities, and errors
-- **🤖 Market Matching AI** - Automatically matches similar predictions across platforms using text similarity
-
----
-
-## 🔄 Data Modes
-
-The bot supports two data modes, configurable in `config.yaml`:
-
-### 🧪 Simulation Mode (for demos & testing)
-
-```yaml
-mode:
-  data_mode: "simulation"  # Generates fake data with opportunities
+    C --> Q[KalshiClient]
+    Q --> R[MarketMatcher]
+    R --> P
 ```
 
-- Generates simulated order books with realistic price dynamics
-- Periodically introduces mispricings to create arbitrage opportunities
-- Perfect for **screenshots, demos, and testing strategies**
-- Fast updates to see the bot in action
+## Runtime Flow
+```mermaid
+sequenceDiagram
+    participant User
+    participant Entry as main.py / run_with_dashboard.py
+    participant Feed as DataFeed
+    participant Poly as PolymarketClient
+    participant Arb as ArbEngine
+    participant Exec as ExecutionEngine
+    participant Risk as RiskManager
+    participant Port as Portfolio
 
-### 🌐 Real Mode (for live trading)
-
-```yaml
-mode:
-  data_mode: "real"  # Fetches actual Polymarket data
+    User->>Entry: start bot
+    Entry->>Poly: connect()
+    Entry->>Feed: start()
+    Feed->>Poly: list_markets() / get_market()
+    loop updates
+        Feed->>Poly: stream_orderbook(...)
+        Feed->>Poly: get_positions()
+        Feed->>Arb: MarketState
+        Arb-->>Entry: signals
+        Entry->>Risk: within_global_limits()
+        Entry->>Exec: submit_signal()
+        Exec->>Risk: check_order()
+        Exec->>Poly: place_order()
+        Poly-->>Exec: order / simulated fill
+        Exec->>Port: update_from_fill()
+        Exec->>Risk: update_from_fill()
+    end
 ```
 
-- Connects to **Polymarket's Gamma API** for market discovery
-- Fetches **real order books** from the CLOB (Central Limit Order Book) API
-- Scans **5,000+ markets** across all categories
-- Real markets are highly efficient - arbitrage opportunities are rare!
-
----
-
-## 📁 Project Structure
-
-```
+## Repository Layout
+```text
 polymarket-arbitrage/
-├── main.py                   # Main entry point
-├── run_with_dashboard.py     # Bot + live dashboard
-├── config.yaml               # Configuration (edit this!)
-├── requirements.txt          # Python dependencies
-│
-├── polymarket_client/        # Polymarket API client
-│   ├── api.py               # REST + WebSocket integration
-│   └── models.py            # Data classes
-│
-├── kalshi_client/            # Kalshi API client (NEW!)
-│   ├── api.py               # Kalshi REST API integration
-│   └── models.py            # Kalshi data classes
-│
-├── core/                     # Trading logic
-│   ├── data_feed.py         # Real-time market data manager
-│   ├── arb_engine.py        # Single-platform opportunity detection
-│   ├── cross_platform_arb.py # Cross-platform arbitrage (NEW!)
-│   ├── execution.py         # Order management
-│   ├── risk_manager.py      # Risk limits & kill switch
-│   └── portfolio.py         # Position & PnL tracking
-│
-├── dashboard/                # Web dashboard
-│   ├── server.py            # FastAPI server
-│   └── integration.py       # Bot-dashboard bridge
-│
-├── utils/                    # Utilities
-│   ├── config_loader.py     # YAML config parser
-│   ├── logging_utils.py     # Colored console logging
-│   └── backtest.py          # Backtesting engine
-│
-├── tests/                    # Unit tests
-│   ├── test_arb_engine.py
-│   ├── test_risk_manager.py
-│   └── test_portfolio.py
-│
-└── logs/                     # Log files (auto-created)
+├── main.py
+├── run_with_dashboard.py
+├── config.yaml
+├── requirements.txt
+├── core/
+├── polymarket_client/
+├── kalshi_client/
+├── dashboard/
+├── utils/
+├── tests/
+├── test_connection.py
+└── test_real_data.py
 ```
 
----
-
-## 🚀 Quick Start
-
-### 1. Clone & Install
-
+## Quick Start
+### 1. Install
 ```bash
-git clone https://github.com/ImMike/polymarket-arbitrage.git
-cd polymarket-arbitrage
-
-# Create virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate      # Linux/Mac
-venv\Scripts\activate         # Windows
-
-# Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure
-
-Edit `config.yaml`:
+### 2. Review `config.yaml`
+Recommended safe starting point:
 
 ```yaml
 mode:
-  trading_mode: "dry_run"     # Start with dry run!
-  data_mode: "real"           # Use "simulation" for demos
-  cross_platform_enabled: true  # Enable Polymarket + Kalshi arbitrage
-  kalshi_enabled: true        # Enable Kalshi monitoring
+  trading_mode: "dry_run"
+  data_mode: "simulation"
 
 trading:
-  min_edge: 0.01              # 1% minimum edge
-  default_order_size: 5       # Start small
+  bundle_arb_enabled: true
+  mm_enabled: false
 
 risk:
   max_position_per_market: 15
@@ -169,248 +139,128 @@ risk:
   max_daily_loss: 10
 ```
 
-### 3. Run with Dashboard
+### 3. Run
+Bot only:
 
 ```bash
-# Run bot with live dashboard
-python run_with_dashboard.py
-
-# Open http://localhost:8000 in your browser
-```
-
-### 4. Other Run Modes
-
-```bash
-# Bot only (no dashboard)
 python main.py
-
-# Verbose logging
-python main.py -v
-
-# Specify config file
-python main.py --config config.live.yaml
 ```
 
----
-
-## 📊 Live Dashboard
-
-The dashboard provides real-time visibility into bot operations:
-
-<div align="center">
-
-| Metric | Description |
-|--------|-------------|
-| **Opportunities** | Bundle arb & market-making signals found |
-| **Markets Monitored** | Total markets being scanned |
-| **Order Books** | Markets with live price data |
-| **Uptime** | Bot running time |
-| **PnL** | Profit/Loss tracking |
-
-</div>
-
-Access at `http://localhost:8000` when running with `run_with_dashboard.py`
-
----
-
-## 📈 Trading Strategies
-
-### 🔀 Cross-Platform Arbitrage (NEW!)
-
-Detects when the same prediction is priced differently on Polymarket vs Kalshi:
-
-| Condition | Action | Profit |
-|-----------|--------|--------|
-| Polymarket YES cheaper than Kalshi YES | Buy on Polymarket, Sell on Kalshi | Price difference |
-| Kalshi YES cheaper than Polymarket YES | Buy on Kalshi, Sell on Polymarket | Price difference |
-
-**Example**: 
-- "Will Trump win?" YES is **$0.52** on Polymarket
-- Same prediction YES is **$0.58** on Kalshi
-- **Profit opportunity**: Buy on Polymarket, sell on Kalshi = **6% edge** (minus fees)
-
-The bot uses **text similarity matching** to automatically find equivalent predictions across platforms.
-
-### Bundle Arbitrage
-
-Detects when YES + NO tokens are mispriced within a single platform:
-
-| Condition | Action | Profit |
-|-----------|--------|--------|
-| `ask_yes + ask_no < $1.00` | Buy both | Guaranteed $1 payout |
-| `bid_yes + bid_no > $1.00` | Sell both | Lock in premium |
-
-**Example**: If YES trades at $0.45 and NO at $0.52, buying both costs $0.97 but pays out $1.00 = **3% profit**
-
-### Market Making
-
-Places orders inside wide spreads:
-
-1. If spread ≥ 5¢, place bid slightly above best bid
-2. Place ask slightly below best ask  
-3. Profit when both sides fill
-
----
-
-## ⚙️ Configuration
-
-### Key Parameters
-
-| Section | Parameter | Description | Default |
-|---------|-----------|-------------|---------|
-| `mode` | `trading_mode` | `"dry_run"` or `"live"` | `dry_run` |
-| `mode` | `data_mode` | `"simulation"` or `"real"` | `real` |
-| `mode` | `cross_platform_enabled` | Enable Polymarket + Kalshi | `true` |
-| `mode` | `kalshi_enabled` | Enable Kalshi monitoring | `true` |
-| `mode` | `min_match_similarity` | Market matching threshold | 0.6 |
-| `trading` | `min_edge` | Min profit after fees | 0.01 (1%) |
-| `trading` | `min_spread` | Min spread for MM | 0.05 (5¢) |
-| `trading` | `mm_enabled` | Enable market making | true |
-| `risk` | `max_position_per_market` | Max $ per market | 200 |
-| `risk` | `max_global_exposure` | Max total exposure | 5000 |
-| `risk` | `max_daily_loss` | Stop-loss limit | 500 |
-
-### Fee Configuration
-
-```yaml
-trading:
-  maker_fee_bps: 0            # Polymarket maker fee (0%)
-  taker_fee_bps: 0            # Polymarket taker fee (0%)
-  estimated_gas_per_order: 0.001  # Polygon gas (minimal)
-```
-
-### Environment Variables
-
-Store sensitive data in environment variables:
+Bot plus dashboard:
 
 ```bash
-export POLYMARKET_API_KEY="your_api_key"
-export POLYMARKET_PRIVATE_KEY="your_private_key"
+python run_with_dashboard.py
 ```
 
----
+Dashboard default URL:
 
-## 🧪 Testing
+```text
+http://localhost:8888
+```
+
+Useful flags:
 
 ```bash
-# Run all tests
-pytest tests/ -v
-
-# Run specific test
-pytest tests/test_arb_engine.py -v
-
-# With coverage report
-pytest tests/ --cov=core --cov=polymarket_client
+python main.py --dry-run
+python main.py --live
+python main.py --backtest --backtest-duration 300
+python run_with_dashboard.py --port 8888 --host 127.0.0.1
+python main.py -c config.yaml -v
 ```
 
----
+## Modes
+### Trading mode
+- `dry_run`: orders and fills are simulated in memory
+- `live`: requires credentials and uses the repo's current live API implementation
 
-## 📊 How It Works
+### Data mode
+- `real`: polls live Polymarket market/order book endpoints
+- `simulation`: generates synthetic books with deliberate inefficiencies
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      CROSS-PLATFORM ARBITRAGE FLOW                          │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌──────────────┐         ┌───────────────┐         ┌──────────────┐       │
-│  │  Polymarket  │────────▶│  Market       │◀────────│    Kalshi    │       │
-│  │  5000+ mkts  │         │  Matcher      │         │  5000+ mkts  │       │
-│  └──────────────┘         └───────┬───────┘         └──────────────┘       │
-│         │                         │                        │                │
-│         │                    Matched Pairs                 │                │
-│         │                         │                        │                │
-│         ▼                         ▼                        ▼                │
-│  ┌──────────────┐         ┌───────────────┐         ┌──────────────┐       │
-│  │  Data Feed   │────────▶│ Cross-Platform│◀────────│  Kalshi      │       │
-│  │  (orderbooks)│         │  Arb Engine   │         │  Orderbooks  │       │
-│  └──────────────┘         └───────┬───────┘         └──────────────┘       │
-│         │                         │                        │                │
-│         │                    Opportunities                 │                │
-│         │                         │                        │                │
-│         ▼                         ▼                        ▼                │
-│  ┌──────────────┐         ┌───────────────┐         ┌──────────────┐       │
-│  │  Dashboard   │◀────────│   Execution   │────────▶│  Portfolio   │       │
-│  │  (live UI)   │         │   (orders)    │         │  (tracking)  │       │
-│  └──────────────┘         └───────────────┘         └──────────────┘       │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+## Configuration Notes
+Credentials can be supplied in `config.yaml` or via environment variables:
+
+```bash
+export POLYMARKET_API_KEY="..."
+export POLYMARKET_API_SECRET="..."
+export POLYMARKET_PASSPHRASE="..."
+export POLYMARKET_PRIVATE_KEY="..."
 ```
 
----
+Important implementation notes:
 
-## ⚠️ Important Notes
+- `mode.min_match_similarity` exists in config but is not currently passed into `MarketMatcher`
+- `trading.maker_fee_bps`, `trading.taker_fee_bps`, and `trading.estimated_gas_per_order` are defined in config, but the entrypoints currently instantiate `ArbEngine` without forwarding those values
+- `logging.*` exists in config, but the entrypoints currently call `setup_logging(console_level=...)` with defaults rather than the full config block
+- `monitoring.heartbeat_interval` is defined but not used in the runtime loop
 
-### About Real Markets
+## Dashboard
+The dashboard exposes:
 
-> **Real prediction markets are highly efficient.** Arbitrage opportunities are rare and fleeting. The bot is designed to catch them when they occur, but don't expect constant profits.
+- `/`
+- `/api/state`
+- `/api/markets`
+- `/api/opportunities`
+- `/api/portfolio`
+- `/api/risk`
+- `/api/timing`
+- `/ws`
 
-### Risk Warnings
+The dashboard shows market state, opportunities, signals, trades, risk, portfolio summaries, and cross-platform matching progress.
 
-1. **🧪 Start in dry run mode** - Always test before using real money
-2. **💵 Start small** - Begin with minimal capital ($50-100)
-3. **👀 Monitor actively** - Don't leave running unattended
-4. **📉 Expect losses** - Trading always carries risk
-5. **🔬 This is experimental** - Use at your own risk
+## Cross-Platform Status
+This repo includes:
 
-### Polymarket Notes
+- a Kalshi market data client
+- a market matcher between Polymarket and Kalshi
+- a cross-platform arbitrage calculator
+- dashboard state for matching progress and matched pairs
 
-- Polymarket uses a **hybrid model**: centralized order matching, on-chain settlement
-- No gas fees for trading (Polymarket covers them)
-- Funds are held in USDC on Polygon
-- API keys required for live trading
+What is **not** currently wired end-to-end:
 
-### Kalshi Notes
+- live cross-platform opportunity generation inside `_on_market_update`
+- Kalshi order execution
+- automated Polymarket <-> Kalshi hedged execution
 
-- Kalshi is a **CFTC-regulated** US prediction market exchange
-- Prices are in cents (e.g., 55¢ for YES)
-- No authentication required for public market data
-- Must be US-based to trade (KYC required)
-- API documentation: [docs.kalshi.com](https://docs.kalshi.com)
+## Testing
+Unit tests:
 
----
+```bash
+pytest tests -v
+```
 
-## 🔧 Development
+Manual smoke checks:
 
-### Adding New Strategies
+```bash
+python test_real_data.py
+python test_connection.py -c config.yaml
+```
 
-1. Add detection logic in `core/arb_engine.py`
-2. Create `Opportunity` objects with entry/exit prices
-3. Execution engine handles order placement
+Note: `test_connection.py` defaults to `config.live.yaml`, but that file is not present in this repository.
 
-### Extending the Dashboard
+## Documentation
+Detailed docs live in `docs/`:
 
-The dashboard uses FastAPI + vanilla JS. Add new endpoints in `dashboard/server.py` and update the HTML in `get_embedded_html()`.
+- `docs/README.md`
+- `docs/ai-repo-map.md`
+- `docs/architecture.md`
+- `docs/features/trading-bot.md`
+- `docs/features/polymarket-data-feed.md`
+- `docs/features/strategies.md`
+- `docs/features/execution-risk-portfolio.md`
+- `docs/features/dashboard.md`
+- `docs/features/cross-platform.md`
+- `docs/features/configuration-backtesting-and-tests.md`
 
----
+## Known Limitations
+- The main "live" Polymarket order book stream is polling-based and rotates through market batches, so updates are not truly real-time across all discovered markets.
+- The Polymarket client contains TODO/placeholder comments around full authenticated CLOB integration.
+- Cross-platform matching is operational for discovery and dashboard display, but cross-platform trading is not wired into the execution loop.
+- Some config keys are documented in code/config but not fully consumed by the entrypoints.
 
-## 📄 License
+## Safety
+- Start with `dry_run`
+- Prefer `simulation` when testing the full loop
+- Review the risk limits before enabling `live`
+- Treat this repository as experimental trading software
 
-MIT License - See [LICENSE](LICENSE) for details
-
----
-
-## 👤 Author
-
-**[ImMike](https://github.com/ImMike)**
-
-- GitHub: [@ImMike](https://github.com/ImMike)
-
----
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-<div align="center">
-
-**⚠️ Disclaimer**: This software is for educational purposes. Trading prediction markets involves risk of loss. Past performance does not guarantee future results. Always do your own research.
-
-Made with ☕ and Python by [ImMike](https://github.com/ImMike)
-
-</div>

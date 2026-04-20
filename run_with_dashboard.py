@@ -15,6 +15,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import socket
 import signal
 import sys
 import threading
@@ -42,9 +43,10 @@ logger = logging.getLogger(__name__)
 class TradingBotWithDashboard:
     """Trading bot with integrated dashboard."""
     
-    def __init__(self, config: BotConfig, port: int = 8888):
+    def __init__(self, config: BotConfig, port: int = 8888, host: str = "0.0.0.0"):
         self.config = config
         self.port = port
+        self.host = host
         self._running = False
         
         # Components - Polymarket
@@ -74,7 +76,12 @@ class TradingBotWithDashboard:
         logger.info("=" * 60)
         logger.info(f"Mode: {'DRY RUN' if self.config.is_dry_run else 'LIVE'}")
         logger.info(f"Cross-Platform: {'ENABLED' if self.config.mode.cross_platform_enabled else 'DISABLED'}")
-        logger.info(f"Dashboard: http://localhost:{self.port}")
+        logger.info(f"Dashboard bind: {self.host}:{self.port}")
+        logger.info(f"Dashboard (local): http://localhost:{self.port}")
+        if self.host in ("0.0.0.0", "::"):
+            lan_ip = self._get_lan_ip()
+            if lan_ip:
+                logger.info(f"Dashboard (LAN): http://{lan_ip}:{self.port}")
         logger.info("=" * 60)
         
         self._running = True
@@ -85,8 +92,12 @@ class TradingBotWithDashboard:
             ws_url=self.config.api.polymarket_ws_url,
             gamma_url=self.config.api.gamma_api_url,
             api_key=self.config.api.api_key,
+            api_secret=self.config.api.api_secret,
+            passphrase=self.config.api.passphrase,
             private_key=self.config.api.private_key,
             timeout=self.config.api.timeout_seconds,
+            max_retries=self.config.api.max_retries,
+            retry_delay=self.config.api.retry_delay_seconds,
             dry_run=self.config.is_dry_run,
         )
         await self.client.connect()
@@ -95,6 +106,7 @@ class TradingBotWithDashboard:
         if self.config.mode.cross_platform_enabled and self.config.mode.kalshi_enabled:
             logger.info("Initializing Kalshi client for cross-platform arbitrage...")
             self.kalshi_client = KalshiClient(
+                base_url=self.config.api.kalshi_api_url,
                 timeout=self.config.api.timeout_seconds,
                 max_retries=self.config.api.max_retries,
                 dry_run=self.config.is_dry_run,
@@ -185,19 +197,36 @@ class TradingBotWithDashboard:
         await self._start_server()
         
         logger.info("Bot and dashboard started successfully!")
-        logger.info(f"Open http://localhost:{self.port} in your browser")
+        logger.info(f"Open http://localhost:{self.port} (same device)")
+        if self.host in ("0.0.0.0", "::"):
+            lan_ip = self._get_lan_ip()
+            if lan_ip:
+                logger.info(f"From another device: http://{lan_ip}:{self.port}")
     
     async def _start_server(self) -> None:
         """Start the uvicorn server."""
         config = uvicorn.Config(
             app,
-            host="0.0.0.0",
+            host=self.host,
             port=self.port,
             log_level="warning",
             access_log=False,
         )
         self._server = uvicorn.Server(config)
         self._server_task = asyncio.create_task(self._server.serve())
+
+    @staticmethod
+    def _get_lan_ip() -> str | None:
+        """Best-effort LAN IP for cross-device dashboard access."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # No packets are sent; this only resolves the outbound interface.
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+        except OSError:
+            return None
+        finally:
+            sock.close()
     
     def _on_market_update(self, market_id: str, market_state) -> None:
         """Handle market updates."""
@@ -451,7 +480,7 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "dry_run"
     
     # Create and run bot with dashboard
-    bot = TradingBotWithDashboard(config, port=args.port)
+    bot = TradingBotWithDashboard(config, port=args.port, host=args.host)
     
     # Handle shutdown
     loop = asyncio.get_event_loop()
@@ -496,6 +525,12 @@ def main() -> None:
         type=int,
         default=8888,
         help="Dashboard port (default: 8888)"
+    )
+
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Dashboard bind host (default: 0.0.0.0, use 127.0.0.1 for local-only)"
     )
     
     parser.add_argument(

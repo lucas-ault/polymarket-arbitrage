@@ -204,7 +204,18 @@ class PolymarketClient(BasePolymarketClient):
                     json=json_data,
                 )
                 response.raise_for_status()
-                return response.json()
+                if response.status_code == 204 or not response.content:
+                    return {}
+
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    return response.json()
+
+                # Some endpoints may return an empty/non-JSON body on success.
+                try:
+                    return response.json()
+                except ValueError:
+                    return {}
             except httpx.HTTPStatusError as e:
                 logger.warning(f"HTTP error {e.response.status_code} on {url}: {e}")
                 if e.response.status_code >= 500:
@@ -331,17 +342,20 @@ class PolymarketClient(BasePolymarketClient):
             no_token_id = ""
             
             if clob_token_ids_raw:
-                try:
-                    # It's a JSON array string
-                    token_ids = json.loads(clob_token_ids_raw)
-                    if isinstance(token_ids, list):
-                        yes_token_id = str(token_ids[0]).strip() if len(token_ids) > 0 else ""
-                        no_token_id = str(token_ids[1]).strip() if len(token_ids) > 1 else ""
-                except (json.JSONDecodeError, TypeError):
-                    # Fallback: try comma-separated
-                    token_ids = clob_token_ids_raw.split(",")
-                    yes_token_id = token_ids[0].strip() if len(token_ids) > 0 else ""
-                    no_token_id = token_ids[1].strip() if len(token_ids) > 1 else ""
+                token_ids = []
+                if isinstance(clob_token_ids_raw, list):
+                    token_ids = clob_token_ids_raw
+                elif isinstance(clob_token_ids_raw, str):
+                    try:
+                        parsed = json.loads(clob_token_ids_raw)
+                        if isinstance(parsed, list):
+                            token_ids = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        # Fallback: try comma-separated
+                        token_ids = clob_token_ids_raw.split(",")
+
+                yes_token_id = str(token_ids[0]).strip() if len(token_ids) > 0 else ""
+                no_token_id = str(token_ids[1]).strip() if len(token_ids) > 1 else ""
             
             # Parse outcomes - JSON string like '["Yes", "No"]'
             outcomes_str = data.get("outcomes", "")
@@ -788,14 +802,18 @@ class PolymarketClient(BasePolymarketClient):
             return order
         
         try:
-            # TODO: Implement actual order placement
-            # Would need to:
-            # 1. Build order with proper token IDs
-            # 2. Sign with private key
-            # 3. Submit to CLOB
+            market = self._markets_cache.get(market_id)
+            if not market or not market.yes_token_id or not market.no_token_id:
+                market = await self.get_market(market_id)
+                self._markets_cache[market_id] = market
+
+            token_id = market.yes_token_id if token_type == TokenType.YES else market.no_token_id
+            if not token_id:
+                raise ValueError(f"Missing {token_type.value} token_id for market {market_id}")
+
             payload = {
                 "market_id": market_id,
-                "token_id": "",  # TODO: Map token_type to actual token ID
+                "token_id": token_id,
                 "side": side.value,
                 "price": str(price),
                 "size": str(size),

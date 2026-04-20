@@ -126,11 +126,11 @@ class RiskManager:
             return False
         
         # Global exposure check
-        projected_global = self.state.global_exposure + abs(new_exposure)
+        projected_global = max(0.0, self.state.global_exposure + new_exposure)
         if projected_global > self.config.max_global_exposure:
             logger.warning(
                 f"Order rejected: would exceed global limit | "
-                f"current={self.state.global_exposure:.2f} + order={abs(new_exposure):.2f} = "
+                f"current={self.state.global_exposure:.2f} + order={new_exposure:.2f} = "
                 f"{projected_global:.2f} > {self.config.max_global_exposure}"
             )
             return False

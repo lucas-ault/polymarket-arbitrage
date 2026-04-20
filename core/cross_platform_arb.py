@@ -254,7 +254,7 @@ class MarketMatcher:
             match = re.search(pattern, text_lower)
             if match:
                 day = match.group(1).zfill(2)
-                year = match.group(2) or '2024'  # Default to current year
+                year = match.group(2) or str(datetime.utcnow().year)
                 return f"{year}-{month_num}-{day}"
         
         # Pattern: "12/8/24", "12-8-2024"
@@ -640,8 +640,16 @@ class CrossPlatformArbEngine:
         kalshi_no_ask = kalshi_ob.best_ask_no
         kalshi_no_bid = kalshi_ob.best_bid_no
         
-        # Check for valid prices
-        if not all([poly_yes_ask, poly_yes_bid, kalshi_yes_ask, kalshi_yes_bid]):
+        # Require at least one complete side (YES or NO) on both platforms.
+        has_yes_books = (
+            poly_yes_ask is not None and poly_yes_bid is not None and
+            kalshi_yes_ask is not None and kalshi_yes_bid is not None
+        )
+        has_no_books = (
+            poly_no_ask is not None and poly_no_bid is not None and
+            kalshi_no_ask is not None and kalshi_no_bid is not None
+        )
+        if not (has_yes_books or has_no_books):
             return None
         
         best_opp = None

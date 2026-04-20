@@ -33,10 +33,11 @@ class KalshiClient:
     not just election-related ones.
     """
     
-    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+    DEFAULT_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
     
     def __init__(
         self,
+        base_url: str = DEFAULT_BASE_URL,
         timeout: float = 30.0,
         max_retries: int = 3,
         dry_run: bool = True,
@@ -49,6 +50,7 @@ class KalshiClient:
             max_retries: Maximum number of retry attempts
             dry_run: If True, don't place real orders (read-only mode)
         """
+        self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_retries = max_retries
         self.dry_run = dry_run
@@ -83,7 +85,7 @@ class KalshiClient:
         if not self._client:
             raise RuntimeError("Client not initialized. Use async with context manager.")
         
-        url = f"{self.BASE_URL}{endpoint}"
+        url = f"{self.base_url}{endpoint}"
         
         for attempt in range(self.max_retries):
             try:
@@ -410,6 +412,10 @@ class KalshiClient:
             Tuple of (ticker, OrderBook) for each update
         """
         logger.info(f"Starting Kalshi orderbook stream for {len(tickers)} markets")
+        if not tickers:
+            logger.warning("No Kalshi tickers provided for streaming")
+            await asyncio.sleep(rotation_delay)
+            return
         
         while True:
             for i in range(0, len(tickers), batch_size):

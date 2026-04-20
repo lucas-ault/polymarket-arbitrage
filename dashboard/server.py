@@ -1993,7 +1993,10 @@ def get_embedded_html() -> str:
             document.getElementById('polymarketMarkets').textContent = polyCount.toLocaleString();
             document.getElementById('kalshiMarkets').textContent = kalshiCount.toLocaleString();
             document.getElementById('matchedPairs').textContent = matchedCount;
-            document.getElementById('kalshiOrderbooks').textContent = kalshiObs;
+            const kalshiOrderbooksEl = document.getElementById('kalshiOrderbooks');
+            if (kalshiOrderbooksEl) {
+                kalshiOrderbooksEl.textContent = kalshiObs;
+            }
             
             // Update status indicators with loading animation
             const polyStatus = document.getElementById('polymarketStatus');
@@ -2058,10 +2061,10 @@ def get_embedded_html() -> str:
                 matchStatus.className = 'platform-stat-status';
             }
             
-            if (kalshiObs > 0) {
+            if (kalshiObStatus && kalshiObs > 0) {
                 kalshiObStatus.textContent = `${kalshiObs} fetched`;
                 kalshiObStatus.className = 'platform-stat-status ready';
-            } else if (matchedCount > 0) {
+            } else if (kalshiObStatus && matchedCount > 0) {
                 kalshiObStatus.textContent = '⏳ Fetching...';
                 kalshiObStatus.className = 'platform-stat-status loading';
             }
@@ -2088,6 +2091,9 @@ def get_embedded_html() -> str:
             
             // Update matched pairs grid
             const grid = document.getElementById('matchedPairsGrid');
+            if (!grid) {
+                return;
+            }
             if (!cp.enabled) {
                 grid.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 2rem; grid-column: 1 / -1;"><div style="font-size: 2rem; margin-bottom: 0.5rem;">⏸️</div><div>Cross-platform mode disabled</div></div>';
                 return;

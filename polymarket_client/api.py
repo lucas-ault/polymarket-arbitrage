@@ -144,6 +144,21 @@ class PolymarketClient(BasePolymarketClient):
         # Cache for market data (avoids re-fetching)
         self._markets_cache: dict[str, Market] = {}
         
+        # Runtime metrics for observability/perf tuning
+        self._runtime_stats: dict[str, float] = {
+            "market_discovery_batches": 0.0,
+            "market_discovery_duration_ms": 0.0,
+            "markets_discovered_valid": 0.0,
+            "orderbook_updates_emitted": 0.0,
+            "orderbook_rotations": 0.0,
+            "last_rotation_duration_ms": 0.0,
+            "avg_rotation_duration_ms": 0.0,
+            "max_rotation_duration_ms": 0.0,
+            "active_batch_size": 0.0,
+            "markets_per_request_batch": 0.0,
+            "request_concurrency": 0.0,
+        }
+        
     async def __aenter__(self) -> "PolymarketClient":
         await self.connect()
         return self
@@ -240,6 +255,7 @@ class PolymarketClient(BasePolymarketClient):
         Uses pagination to get ALL active markets across all categories!
         """
         try:
+            discovery_started_at = time.perf_counter()
             params = filters.copy() if filters else {}
             params.setdefault("closed", "false")
             params.setdefault("order", "volume24hr")
@@ -249,6 +265,7 @@ class PolymarketClient(BasePolymarketClient):
             offset = 0
             limit = 100  # Gamma API max per request
             max_markets = 5000  # Get up to 5000 markets!
+            discovery_batches = 0
             
             logger.info("Fetching ALL available markets from Polymarket...")
             
@@ -266,6 +283,7 @@ class PolymarketClient(BasePolymarketClient):
                 
                 if not data:
                     break
+                discovery_batches += 1
                 
                 batch_valid = 0
                 for item in data:
@@ -292,6 +310,11 @@ class PolymarketClient(BasePolymarketClient):
                     logger.info(f"Reached {max_markets} market cap")
                     break
             
+            self._runtime_stats["market_discovery_batches"] = float(discovery_batches)
+            self._runtime_stats["markets_discovered_valid"] = float(len(all_markets))
+            self._runtime_stats["market_discovery_duration_ms"] = (
+                time.perf_counter() - discovery_started_at
+            ) * 1000
             logger.info(f"=== TOTAL: {len(all_markets)} active markets with valid tokens ===")
             return all_markets
             
@@ -593,7 +616,39 @@ class PolymarketClient(BasePolymarketClient):
             timestamp=datetime.utcnow(),
         )
     
-    async def stream_orderbook(self, market_ids: list[str], use_simulation: bool = False) -> AsyncIterator[tuple[str, OrderBook]]:
+    async def _fetch_market_orderbook(
+        self,
+        market_id: str,
+        yes_token: str,
+        no_token: str,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[str, OrderBook]:
+        """Fetch YES/NO books for one market with bounded concurrency."""
+        async with semaphore:
+            yes_task = self._fetch_token_orderbook(yes_token, TokenType.YES)
+            no_task = self._fetch_token_orderbook(no_token, TokenType.NO)
+            yes_book, no_book = await asyncio.gather(yes_task, no_task)
+            return (
+                market_id,
+                OrderBook(
+                    market_id=market_id,
+                    yes=yes_book,
+                    no=no_book,
+                    timestamp=datetime.utcnow(),
+                ),
+            )
+    
+    async def stream_orderbook(
+        self,
+        market_ids: list[str],
+        use_simulation: bool = False,
+        active_batch_size: int = 500,
+        markets_per_request_batch: int = 20,
+        request_concurrency: int = 12,
+        request_delay: float = 0.0,
+        batch_delay: float = 0.15,
+        rotation_delay: float = 1.25,
+    ) -> AsyncIterator[tuple[str, OrderBook]]:
         """
         Stream order book updates.
         
@@ -623,12 +678,17 @@ class PolymarketClient(BasePolymarketClient):
             logger.warning("No markets with valid token IDs found!")
             return
         
-        # Settings for processing large market counts
-        active_batch_size = 500  # Process 500 markets per rotation
-        markets_per_request_batch = 20  # Fetch 20 at a time within the active batch
-        request_delay = 0.05  # 50ms between API calls
-        batch_delay = 0.3  # 300ms between request batches
-        rotation_delay = 2.0  # 2 seconds before rotating to next 500
+        # Sanitize settings for large market counts
+        active_batch_size = max(1, active_batch_size)
+        markets_per_request_batch = max(1, markets_per_request_batch)
+        request_concurrency = max(1, request_concurrency)
+        request_delay = max(0.0, request_delay)
+        batch_delay = max(0.0, batch_delay)
+        rotation_delay = max(0.0, rotation_delay)
+        
+        self._runtime_stats["active_batch_size"] = float(active_batch_size)
+        self._runtime_stats["markets_per_request_batch"] = float(markets_per_request_batch)
+        self._runtime_stats["request_concurrency"] = float(request_concurrency)
         
         market_list = list(market_tokens.keys())
         total_markets = len(market_list)
@@ -638,6 +698,7 @@ class PolymarketClient(BasePolymarketClient):
         
         try:
             while True:
+                rotation_started_at = time.perf_counter()
                 # Get current batch of 500 markets
                 end_offset = min(current_offset + active_batch_size, total_markets)
                 active_markets = market_list[current_offset:end_offset]
@@ -647,28 +708,24 @@ class PolymarketClient(BasePolymarketClient):
                 # Process this batch
                 for i in range(0, len(active_markets), markets_per_request_batch):
                     request_batch = active_markets[i:i + markets_per_request_batch]
-                    
-                    for market_id in request_batch:
-                        try:
-                            yes_token, no_token = market_tokens[market_id]
-                            
-                            # Fetch REAL order books from CLOB API
-                            yes_book = await self._fetch_token_orderbook(yes_token, TokenType.YES)
-                            no_book = await self._fetch_token_orderbook(no_token, TokenType.NO)
-                            
-                            orderbook = OrderBook(
-                                market_id=market_id,
-                                yes=yes_book,
-                                no=no_book,
-                                timestamp=datetime.utcnow(),
-                            )
-                            
-                            yield (market_id, orderbook)
-                            await asyncio.sleep(request_delay)
-                            
-                        except Exception as e:
-                            # Silently skip errors - don't spam logs
+                    semaphore = asyncio.Semaphore(request_concurrency)
+                    tasks = [
+                        self._fetch_market_orderbook(
+                            market_id=market_id,
+                            yes_token=market_tokens[market_id][0],
+                            no_token=market_tokens[market_id][1],
+                            semaphore=semaphore,
+                        )
+                        for market_id in request_batch
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, Exception):
                             continue
+                        yield result
+                        self._runtime_stats["orderbook_updates_emitted"] += 1
+                        if request_delay > 0:
+                            await asyncio.sleep(request_delay)
                     
                     await asyncio.sleep(batch_delay)
                 
@@ -677,6 +734,19 @@ class PolymarketClient(BasePolymarketClient):
                 if current_offset >= total_markets:
                     current_offset = 0  # Start over from beginning
                     logger.info("Completed full market cycle, starting over...")
+                
+                rotation_duration_ms = (time.perf_counter() - rotation_started_at) * 1000
+                total_rotations = self._runtime_stats["orderbook_rotations"] + 1
+                previous_avg = self._runtime_stats["avg_rotation_duration_ms"]
+                self._runtime_stats["orderbook_rotations"] = total_rotations
+                self._runtime_stats["last_rotation_duration_ms"] = rotation_duration_ms
+                self._runtime_stats["avg_rotation_duration_ms"] = (
+                    (previous_avg * (total_rotations - 1)) + rotation_duration_ms
+                ) / total_rotations
+                self._runtime_stats["max_rotation_duration_ms"] = max(
+                    self._runtime_stats["max_rotation_duration_ms"],
+                    rotation_duration_ms,
+                )
                 
                 await asyncio.sleep(rotation_delay)
                 
@@ -927,6 +997,10 @@ class PolymarketClient(BasePolymarketClient):
         except Exception as e:
             logger.warning(f"Failed to fetch trades: {e}")
             return []
+    
+    def get_runtime_stats(self) -> dict[str, float]:
+        """Return client-level runtime metrics for observability."""
+        return self._runtime_stats.copy()
     
     def simulate_fill(self, order_id: str, fill_size: Optional[float] = None) -> Optional[Trade]:
         """

@@ -19,6 +19,7 @@ import socket
 import signal
 import sys
 import threading
+import time
 from datetime import datetime
 
 import uvicorn
@@ -64,6 +65,7 @@ class TradingBotWithDashboard:
         self.market_matcher = None
         self._kalshi_markets = []
         self._matched_pairs = []
+        self._matching_task = None
         
         # Server
         self._server = None
@@ -115,6 +117,7 @@ class TradingBotWithDashboard:
             # Initialize cross-platform arbitrage engine
             self.cross_platform_engine = CrossPlatformArbEngine(
                 min_edge=self.config.trading.min_edge,
+                match_min_similarity=self.config.mode.min_match_similarity,
             )
             self.market_matcher = self.cross_platform_engine.matcher
             
@@ -256,7 +259,8 @@ class TradingBotWithDashboard:
             )
             
             # Submit to execution
-            asyncio.create_task(self.execution_engine.submit_signal(signal))
+            if not self.execution_engine.submit_signal_nowait(signal):
+                logger.warning("Execution queue full; dropping dashboard signal %s", signal.signal_id)
     
     async def _simulate_fills(self) -> None:
         """Simulate order fills in dry run mode."""
@@ -291,6 +295,7 @@ class TradingBotWithDashboard:
         logger.info("Starting Kalshi market monitoring...")
         
         async with self.kalshi_client:
+            kalshi_load_started_at = time.perf_counter()
             # Set up dashboard for loading state
             dashboard_state.cross_platform["enabled"] = True
             dashboard_state.cross_platform["matching_status"] = "loading"
@@ -306,6 +311,9 @@ class TradingBotWithDashboard:
                 max_markets=5000,
                 on_progress=on_kalshi_progress,
             )
+            dashboard_state.cross_platform["kalshi_load_duration_ms"] = (
+                time.perf_counter() - kalshi_load_started_at
+            ) * 1000
             logger.info(f"✓ Loaded {len(self._kalshi_markets)} Kalshi markets")
             
             # Update dashboard state
@@ -335,9 +343,12 @@ class TradingBotWithDashboard:
                 
                 # Set initial status
                 dashboard_state.cross_platform["matching_status"] = "starting"
+                start_delay = getattr(self.config.mode, "cross_platform_match_start_delay_seconds", 0.0)
+                if start_delay > 0:
+                    await asyncio.sleep(start_delay)
                 
                 # Start matching as a background task (dashboard will show progress)
-                asyncio.create_task(self._run_matching_background(polymarket_markets))
+                self._matching_task = asyncio.create_task(self._run_matching_background(polymarket_markets))
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
         """Run market matching in a thread pool so dashboard stays fully responsive."""
@@ -347,10 +358,11 @@ class TradingBotWithDashboard:
             dashboard_state.cross_platform["matching_status"] = "matching"
             total = len(polymarket_markets) * len(self._kalshi_markets)
             dashboard_state.cross_platform["matching_total"] = total
+            matching_started_at = time.perf_counter()
             
             # Run matching in thread pool to avoid blocking event loop
             loop = asyncio.get_event_loop()
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            progress_queue: asyncio.Queue[dict] = asyncio.Queue()
             
             def run_matching_sync():
                 """Synchronous matching that runs in thread."""
@@ -361,22 +373,14 @@ class TradingBotWithDashboard:
                 
                 try:
                     def on_progress(checked, total, matches_found):
-                        dashboard_state.cross_platform["matching_checked"] = checked
-                        dashboard_state.cross_platform["matching_progress"] = int(checked / total * 100) if total > 0 else 0
-                        dashboard_state.cross_platform["matched_pairs"] = matches_found
-                        
-                        # Update display data incrementally (show latest matches)
-                        cached_pairs = self.market_matcher.get_cached_pairs()
-                        if cached_pairs:
-                            display_data = []
-                            for pair in cached_pairs[-50:]:  # Show latest 50
-                                display_data.append({
-                                    "poly_question": pair.polymarket_question,
-                                    "kalshi_title": pair.kalshi_title,
-                                    "similarity": pair.similarity_score,
-                                    "category": pair.category,
-                                })
-                            dashboard_state.cross_platform["matched_pairs_data"] = display_data
+                        loop.call_soon_threadsafe(
+                            progress_queue.put_nowait,
+                            {
+                                "checked": checked,
+                                "total": total,
+                                "matches_found": matches_found,
+                            },
+                        )
                     
                     result = new_loop.run_until_complete(
                         self.market_matcher.find_matches(
@@ -388,12 +392,28 @@ class TradingBotWithDashboard:
                     return result
                 finally:
                     new_loop.close()
-            
-            self._matched_pairs = await loop.run_in_executor(executor, run_matching_sync)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                matching_future = loop.run_in_executor(executor, run_matching_sync)
+                while not matching_future.done():
+                    try:
+                        progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                    dashboard_state.cross_platform["matching_checked"] = progress["checked"]
+                    total_comparisons = progress["total"]
+                    dashboard_state.cross_platform["matching_progress"] = (
+                        int(progress["checked"] / total_comparisons * 100)
+                        if total_comparisons > 0 else 0
+                    )
+                    dashboard_state.cross_platform["matched_pairs"] = progress["matches_found"]
+                self._matched_pairs = await matching_future
             
             dashboard_state.cross_platform["matching_status"] = "complete"
             dashboard_state.cross_platform["matching_progress"] = 100
             dashboard_state.cross_platform["matched_pairs"] = len(self._matched_pairs)
+            dashboard_state.cross_platform["matching_duration_ms"] = (
+                time.perf_counter() - matching_started_at
+            ) * 1000
             
             logger.info(f"✓ Matching complete! Found {len(self._matched_pairs)} pairs")
             
@@ -431,6 +451,13 @@ class TradingBotWithDashboard:
         
         if self.client:
             await self.client.disconnect()
+        
+        if self._matching_task:
+            self._matching_task.cancel()
+            try:
+                await self._matching_task
+            except asyncio.CancelledError:
+                pass
         
         # Kalshi client is closed via async context manager in _start_kalshi_monitoring
         

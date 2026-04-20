@@ -7,6 +7,7 @@ Integrates the dashboard with the trading bot components.
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -42,6 +43,9 @@ class DashboardIntegration:
         
         self._update_task: Optional[asyncio.Task] = None
         self._running = False
+        self._loop_count = 0
+        self._ws_market_limit = 250
+        self._full_market_refresh_interval = 30
     
     async def start(self, update_interval: float = 1.0) -> None:
         """Start the dashboard integration."""
@@ -83,12 +87,17 @@ class DashboardIntegration:
     
     async def _update_state(self) -> None:
         """Update the dashboard state from bot components."""
+        loop_started_at = time.perf_counter()
+        
         # Update markets
         if self.data_feed:
-            markets = {}
-            for market_id, state in self.data_feed.get_all_market_states().items():
+            changed_states = self.data_feed.consume_changed_market_states(limit=5000)
+            if not changed_states and not dashboard_state.markets:
+                changed_states = self.data_feed.get_all_market_states()
+            
+            for market_id, state in changed_states.items():
                 ob = state.order_book
-                markets[market_id] = {
+                dashboard_state.markets[market_id] = {
                     "market_id": market_id,
                     "question": state.market.question[:80] if state.market.question else market_id,
                     "best_bid_yes": ob.best_bid_yes,
@@ -100,7 +109,6 @@ class DashboardIntegration:
                     "spread_yes": ob.yes.spread if ob.yes else None,
                     "spread_no": ob.no.spread if ob.no else None,
                 }
-            dashboard_state.markets = markets
         
         # Update portfolio
         if self.portfolio:
@@ -151,23 +159,63 @@ class DashboardIntegration:
         
         # Update operational stats
         if self.data_feed:
-            markets_with_data = len([m for m in dashboard_state.markets.values() 
-                                     if m.get("best_bid_yes") or m.get("best_ask_yes")])
+            if self._loop_count % self._full_market_refresh_interval == 0:
+                # Keep state in sync in case any market is missed by incremental flow.
+                for market_id, state in self.data_feed.get_all_market_states().items():
+                    if market_id not in dashboard_state.markets:
+                        ob = state.order_book
+                        dashboard_state.markets[market_id] = {
+                            "market_id": market_id,
+                            "question": state.market.question[:80] if state.market.question else market_id,
+                            "best_bid_yes": ob.best_bid_yes,
+                            "best_ask_yes": ob.best_ask_yes,
+                            "best_bid_no": ob.best_bid_no,
+                            "best_ask_no": ob.best_ask_no,
+                            "total_ask": ob.total_ask,
+                            "total_bid": ob.total_bid,
+                            "spread_yes": ob.yes.spread if ob.yes else None,
+                            "spread_no": ob.no.spread if ob.no else None,
+                        }
+            
+            markets_with_data = len([
+                m for m in dashboard_state.markets.values()
+                if m.get("best_bid_yes") is not None or m.get("best_ask_yes") is not None
+            ])
+            staleness = self.data_feed.get_staleness_summary()
+            feed_stats = self.data_feed.get_runtime_stats()
+            client_stats = self.data_feed.client.get_runtime_stats()
+            queue_size = self.execution_engine.signal_queue_size if self.execution_engine else 0
             dashboard_state.operational = {
                 "total_markets": len(self.data_feed.market_ids),
                 "markets_with_orderbooks": len(dashboard_state.markets),
                 "markets_with_prices": markets_with_data,
                 "orderbook_updates": self.data_feed.update_count,
                 "is_streaming": self.data_feed.is_running,
+                "signal_queue_size": queue_size,
+                "avg_staleness_seconds": staleness["avg_staleness_seconds"],
+                "p95_staleness_seconds": staleness["p95_staleness_seconds"],
+                "max_staleness_seconds": staleness["max_staleness_seconds"],
+                "avg_state_update_ms": feed_stats["avg_state_update_ms"],
+                "avg_callback_ms": feed_stats["avg_callback_ms"],
+                "stream_reconnects": int(feed_stats["stream_reconnects"]),
+                "stream_errors": int(feed_stats["stream_errors"]),
+                "market_discovery_batches": int(client_stats["market_discovery_batches"]),
+                "market_discovery_duration_ms": client_stats["market_discovery_duration_ms"],
+                "orderbook_rotations": int(client_stats["orderbook_rotations"]),
+                "last_rotation_duration_ms": client_stats["last_rotation_duration_ms"],
+                "avg_rotation_duration_ms": client_stats["avg_rotation_duration_ms"],
+                "max_rotation_duration_ms": client_stats["max_rotation_duration_ms"],
             }
         
+        self._loop_count += 1
+        dashboard_state.operational["dashboard_update_ms"] = (time.perf_counter() - loop_started_at) * 1000
         dashboard_state.last_update = datetime.utcnow()
     
     async def _broadcast_update(self) -> None:
         """Broadcast update to connected clients."""
         await dashboard_state.broadcast({
             "type": "update",
-            "data": dashboard_state.to_dict()
+            "data": dashboard_state.to_dict(include_markets=True, market_limit=self._ws_market_limit),
         })
     
     def add_opportunity(
@@ -185,12 +233,6 @@ class DashboardIntegration:
             **kwargs
         }
         dashboard_state.add_opportunity(opp)
-        
-        # Broadcast immediately
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "opportunity",
-            "data": opp
-        }))
     
     def add_signal(
         self,
@@ -205,11 +247,6 @@ class DashboardIntegration:
             **kwargs
         }
         dashboard_state.add_signal(signal)
-        
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "activity",
-            "data": signal
-        }))
     
     def add_trade(
         self,
@@ -226,9 +263,4 @@ class DashboardIntegration:
             **kwargs
         }
         dashboard_state.add_trade(trade)
-        
-        asyncio.create_task(dashboard_state.broadcast({
-            "type": "activity",
-            "data": trade
-        }))
 

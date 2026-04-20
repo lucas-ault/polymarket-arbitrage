@@ -99,7 +99,6 @@ Contains snapshot/heartbeat/performance flags.
 ## Config Keys With Incomplete Runtime Wiring
 These config values exist but are not fully consumed by the runtime entrypoints:
 
-- `mode.min_match_similarity`
 - `trading.maker_fee_bps`
 - `trading.taker_fee_bps`
 - `trading.estimated_gas_per_order`
@@ -166,7 +165,15 @@ Checks:
 - market fetch
 - optional authenticated position retrieval
 
-Important note: it defaults to `config.live.yaml`, but that file is not included in this repository.
+It now defaults to `config.yaml`.
+
+### Observation profile
+`config.observation.yaml` is provided for:
+
+- `dry_run` execution
+- `real` data mode
+- full market auto-discovery (`trading.markets: []`)
+- dashboard-first monitoring and tuned orderbook polling controls
 
 ## Recommended Validation Strategy
 For most changes:
@@ -174,7 +181,7 @@ For most changes:
 1. run `pytest tests -v`
 2. run in `dry_run` + `simulation`
 3. run `test_real_data.py` if you changed Polymarket data fetching
-4. run `run_with_dashboard.py` if you changed dashboard or matching behavior
+4. run `run_with_dashboard.py -c config.observation.yaml` if you changed dashboard, matching, or real-data polling behavior
 
 ## Related Docs
 - `../architecture.md`

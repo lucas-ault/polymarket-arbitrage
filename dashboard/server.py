@@ -8,11 +8,12 @@ FastAPI-based web server for the trading dashboard.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -55,12 +56,37 @@ class DashboardState:
         
         # WebSocket connections
         self._connections: list[WebSocket] = []
+        
+        # Broadcast/runtime metrics
+        self._broadcast_count = 0
+        self._broadcast_avg_ms = 0.0
+        self._broadcast_max_ms = 0.0
+        self._last_broadcast_ms = 0.0
+        self._last_broadcast_payload_bytes = 0
     
-    def to_dict(self) -> dict:
+    def to_dict(self, include_markets: bool = True, market_limit: Optional[int] = None) -> dict:
         """Convert state to dictionary for JSON serialization."""
         uptime = (datetime.utcnow() - self.started_at).total_seconds()
+        if include_markets:
+            if market_limit is None:
+                serialized_markets = self.markets
+            else:
+                serialized_markets = {
+                    market_id: market_state
+                    for market_id, market_state in list(self.markets.items())[:max(0, market_limit)]
+                }
+        else:
+            serialized_markets = {}
+        
+        operational = dict(self.operational)
+        operational.setdefault("dashboard_clients", len(self._connections))
+        operational.setdefault("last_ws_payload_bytes", self._last_broadcast_payload_bytes)
+        operational.setdefault("last_ws_broadcast_ms", self._last_broadcast_ms)
+        operational.setdefault("avg_ws_broadcast_ms", self._broadcast_avg_ms)
+        operational.setdefault("max_ws_broadcast_ms", self._broadcast_max_ms)
+        
         return {
-            "markets": self.markets,
+            "markets": serialized_markets,
             "opportunities": self.opportunities[-50:],  # Last 50
             "signals": self.signals[-50:],
             "orders": self.orders,
@@ -69,7 +95,7 @@ class DashboardState:
             "risk": self.risk,
             "stats": self.stats,
             "timing": self.timing,  # Opportunity timing stats
-            "operational": self.operational,  # Operational stats
+            "operational": operational,  # Operational stats
             "cross_platform": self.cross_platform,  # Cross-platform arbitrage stats
             "is_running": self.is_running,
             "mode": self.mode,
@@ -83,14 +109,27 @@ class DashboardState:
         if not self._connections:
             return
         
+        started_at = time.perf_counter()
         message = json.dumps(data)
+        self._last_broadcast_payload_bytes = len(message.encode("utf-8"))
         disconnected = []
         
-        for ws in self._connections:
-            try:
-                await ws.send_text(message)
-            except Exception:
+        send_results = await asyncio.gather(
+            *(ws.send_text(message) for ws in self._connections),
+            return_exceptions=True,
+        )
+        for ws, result in zip(self._connections, send_results):
+            if isinstance(result, Exception):
                 disconnected.append(ws)
+        
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        self._broadcast_count += 1
+        self._last_broadcast_ms = duration_ms
+        self._broadcast_max_ms = max(self._broadcast_max_ms, duration_ms)
+        self._broadcast_avg_ms = (
+            ((self._broadcast_avg_ms * (self._broadcast_count - 1)) + duration_ms)
+            / self._broadcast_count
+        )
         
         for ws in disconnected:
             self._connections.remove(ws)
@@ -166,14 +205,27 @@ def create_app() -> FastAPI:
         return get_embedded_html()
     
     @app.get("/api/state")
-    async def get_state():
+    async def get_state(
+        include_markets: bool = Query(default=True),
+        market_limit: int = Query(default=300, ge=0),
+    ):
         """Get current dashboard state."""
-        return dashboard_state.to_dict()
+        return dashboard_state.to_dict(
+            include_markets=include_markets,
+            market_limit=market_limit if include_markets else 0,
+        )
     
     @app.get("/api/markets")
-    async def get_markets():
+    async def get_markets(market_limit: int = Query(default=0, ge=0)):
         """Get current market data."""
-        return {"markets": dashboard_state.markets}
+        if market_limit <= 0:
+            return {"markets": dashboard_state.markets}
+        return {
+            "markets": {
+                market_id: market_state
+                for market_id, market_state in list(dashboard_state.markets.items())[:market_limit]
+            }
+        }
     
     @app.get("/api/opportunities")
     async def get_opportunities():
@@ -205,7 +257,7 @@ def create_app() -> FastAPI:
             # Send initial state
             await websocket.send_text(json.dumps({
                 "type": "initial",
-                "data": dashboard_state.to_dict()
+                "data": dashboard_state.to_dict(include_markets=True, market_limit=300)
             }))
             
             # Keep connection alive and receive any commands

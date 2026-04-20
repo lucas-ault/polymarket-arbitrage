@@ -84,6 +84,7 @@ mode:
   cross_platform_enabled: true    # Enable cross-platform arbitrage detection
   kalshi_enabled: true            # Enable Kalshi market monitoring
   min_match_similarity: 0.6       # Minimum similarity score for market matching (0-1)
+  cross_platform_match_start_delay_seconds: 5.0  # Delay matching startup to let feed warm up
   
   # Dry run settings
   dry_run_initial_balance: 10000
@@ -115,4 +116,12 @@ monitoring:
   # Performance metrics
   track_latency: true
   track_fill_rates: true
+  
+  # Real orderbook polling controls (used when mode.data_mode = "real")
+  orderbook_active_batch_size: 500
+  orderbook_request_batch_size: 20
+  orderbook_fetch_concurrency: 12
+  orderbook_request_delay_seconds: 0.0
+  orderbook_batch_delay_seconds: 0.15
+  orderbook_rotation_delay_seconds: 1.25
 

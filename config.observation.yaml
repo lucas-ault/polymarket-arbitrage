@@ -1,0 +1,74 @@
+api:
+  polymarket_rest_url: "https://clob.polymarket.com"
+  polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  gamma_api_url: "https://gamma-api.polymarket.com"
+  kalshi_api_url: "https://api.elections.kalshi.com/trade-api/v2"
+  api_key: "YOUR_API_KEY_HERE"
+  api_secret: "YOUR_API_SECRET_HERE"
+  passphrase: "YOUR_PASSPHRASE_HERE"
+  private_key: "YOUR_PRIVATE_KEY_HERE"
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 1
+
+trading:
+  # Empty list means full auto-discovery from Gamma.
+  markets: []
+  min_edge: 0.01
+  bundle_arb_enabled: true
+  min_spread: 0.05
+  tick_size: 0.01
+  mm_enabled: false
+  default_order_size: 5
+  min_order_size: 2
+  max_order_size: 10
+  slippage_tolerance: 0.02
+  order_timeout_seconds: 60
+  maker_fee_bps: 0
+  taker_fee_bps: 150
+  estimated_gas_per_order: 0.02
+
+risk:
+  max_position_per_market: 15
+  max_global_exposure: 50
+  max_daily_loss: 10
+  max_drawdown_pct: 0.15
+  trade_only_high_volume: false
+  min_24h_volume: 10000
+  whitelist: []
+  blacklist: []
+  kill_switch_enabled: true
+  auto_unwind_on_breach: false
+
+mode:
+  trading_mode: "dry_run"
+  data_mode: "real"
+  cross_platform_enabled: true
+  kalshi_enabled: true
+  min_match_similarity: 0.65
+  cross_platform_match_start_delay_seconds: 5.0
+  dry_run_initial_balance: 10000
+  simulate_fills: true
+  fill_probability: 0.8
+
+logging:
+  console_level: "INFO"
+  file_level: "DEBUG"
+  log_dir: "logs"
+  main_log_file: "bot.log"
+  trades_log_file: "trades.log"
+  opportunities_log_file: "opportunities.log"
+  max_log_size_mb: 50
+  backup_count: 5
+
+monitoring:
+  snapshot_interval: 60
+  heartbeat_interval: 30
+  track_latency: true
+  track_fill_rates: true
+  orderbook_active_batch_size: 500
+  orderbook_request_batch_size: 20
+  orderbook_fetch_concurrency: 12
+  orderbook_request_delay_seconds: 0.0
+  orderbook_batch_delay_seconds: 0.15
+  orderbook_rotation_delay_seconds: 1.25

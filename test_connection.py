@@ -7,7 +7,7 @@ Run this BEFORE going live to verify your credentials work.
 
 Usage:
     python3 test_connection.py
-    python3 test_connection.py --config config.live.yaml
+    python3 test_connection.py --config config.yaml
 """
 
 import asyncio
@@ -19,7 +19,7 @@ from utils.logging_utils import setup_logging
 from polymarket_client import PolymarketClient
 
 
-async def test_connection(config_path: str = "config.live.yaml"):
+async def test_connection(config_path: str = "config.yaml"):
     """Test the API connection and credentials."""
     print("=" * 60)
     print("🔌 Polymarket API Connection Test")
@@ -40,12 +40,12 @@ async def test_connection(config_path: str = "config.live.yaml"):
     if config.is_live:
         if not config.api.api_key or config.api.api_key == "YOUR_API_KEY_HERE":
             print("❌ API key not configured!")
-            print("   Edit config.live.yaml and add your API key")
+            print(f"   Edit {config_path} and add your API key")
             return False
         
         if not config.api.private_key or config.api.private_key == "YOUR_WALLET_PRIVATE_KEY_HERE":
             print("❌ Private key not configured!")
-            print("   Edit config.live.yaml and add your wallet private key")
+            print(f"   Edit {config_path} and add your wallet private key")
             return False
     
     print()
@@ -106,8 +106,8 @@ async def test_connection(config_path: str = "config.live.yaml"):
     print("=" * 60)
     print()
     print("Next steps:")
-    print("1. Review config.live.yaml settings")
-    print("2. Start with: python3 run_with_dashboard.py -c config.live.yaml")
+    print(f"1. Review {config_path} settings")
+    print(f"2. Start with: python3 run_with_dashboard.py -c {config_path}")
     print("3. Monitor closely on the dashboard")
     print()
     
@@ -116,7 +116,7 @@ async def test_connection(config_path: str = "config.live.yaml"):
 
 def main():
     parser = argparse.ArgumentParser(description="Test Polymarket API connection")
-    parser.add_argument("-c", "--config", default="config.live.yaml", help="Config file")
+    parser.add_argument("-c", "--config", default="config.yaml", help="Config file")
     args = parser.parse_args()
     
     setup_logging(console_level="WARNING")

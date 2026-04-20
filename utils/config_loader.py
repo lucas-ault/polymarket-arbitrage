@@ -76,6 +76,7 @@ class ModeConfig:
     cross_platform_enabled: bool = True  # Enable cross-platform arbitrage (Polymarket + Kalshi)
     kalshi_enabled: bool = True  # Enable Kalshi market monitoring
     min_match_similarity: float = 0.6  # Minimum similarity score for market matching (0-1)
+    cross_platform_match_start_delay_seconds: float = 0.0
     dry_run_initial_balance: float = 10000.0
     simulate_fills: bool = True
     fill_probability: float = 0.8
@@ -101,6 +102,12 @@ class MonitoringConfig:
     heartbeat_interval: float = 30.0
     track_latency: bool = True
     track_fill_rates: bool = True
+    orderbook_active_batch_size: int = 500
+    orderbook_request_batch_size: int = 20
+    orderbook_fetch_concurrency: int = 12
+    orderbook_request_delay_seconds: float = 0.0
+    orderbook_batch_delay_seconds: float = 0.15
+    orderbook_rotation_delay_seconds: float = 1.25
 
 
 @dataclass
@@ -238,6 +245,17 @@ def _validate_config(config: BotConfig) -> None:
     # Mode validation
     if config.mode.trading_mode.lower() not in ("live", "dry_run"):
         errors.append("mode.trading_mode must be 'live' or 'dry_run'")
+    if config.mode.min_match_similarity < 0 or config.mode.min_match_similarity > 1:
+        errors.append("mode.min_match_similarity must be between 0 and 1")
+    if config.mode.cross_platform_match_start_delay_seconds < 0:
+        errors.append("mode.cross_platform_match_start_delay_seconds must be non-negative")
+    
+    if config.monitoring.orderbook_active_batch_size <= 0:
+        errors.append("monitoring.orderbook_active_batch_size must be positive")
+    if config.monitoring.orderbook_request_batch_size <= 0:
+        errors.append("monitoring.orderbook_request_batch_size must be positive")
+    if config.monitoring.orderbook_fetch_concurrency <= 0:
+        errors.append("monitoring.orderbook_fetch_concurrency must be positive")
     
     # Live mode checks
     if config.is_live:

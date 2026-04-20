@@ -39,6 +39,7 @@ class ExecutionConfig:
     retry_delay: float = 0.5
     enable_slippage_check: bool = True
     dry_run: bool = True
+    max_signal_queue_size: int = 5000
 
 
 @dataclass
@@ -52,6 +53,8 @@ class ExecutionStats:
     signals_processed: int = 0
     signals_rejected: int = 0
     slippage_rejections: int = 0
+    signal_queue_drops: int = 0
+    max_signal_queue_depth: int = 0
 
 
 class ExecutionEngine:
@@ -84,8 +87,9 @@ class ExecutionEngine:
         self._orders_by_strategy: dict[str, list[str]] = {}
         
         # Signal queue
-        self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue()
+        self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue(maxsize=self.config.max_signal_queue_size)
         self._processing_task: Optional[asyncio.Task] = None
+        self._timeout_task: Optional[asyncio.Task] = None
         self._running = False
         
         logger.info(f"ExecutionEngine initialized (dry_run={config.dry_run})")
@@ -102,7 +106,7 @@ class ExecutionEngine:
         )
         
         # Start order timeout monitor
-        asyncio.create_task(self._monitor_order_timeouts(), name="order_timeout_monitor")
+        self._timeout_task = asyncio.create_task(self._monitor_order_timeouts(), name="order_timeout_monitor")
         
         logger.info("ExecutionEngine started")
     
@@ -117,6 +121,13 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 pass
         
+        if self._timeout_task:
+            self._timeout_task.cancel()
+            try:
+                await self._timeout_task
+            except asyncio.CancelledError:
+                pass
+        
         # Cancel all open orders
         await self.cancel_all_orders()
         
@@ -125,7 +136,29 @@ class ExecutionEngine:
     async def submit_signal(self, signal: Signal) -> None:
         """Submit a signal for processing."""
         await self._signal_queue.put(signal)
+        self.stats.max_signal_queue_depth = max(
+            self.stats.max_signal_queue_depth,
+            self._signal_queue.qsize(),
+        )
         logger.debug(f"Signal queued: {signal.signal_id}")
+    
+    def submit_signal_nowait(self, signal: Signal) -> bool:
+        """
+        Try to submit a signal without scheduling extra tasks.
+        
+        Returns True when queued, False when queue is full.
+        """
+        try:
+            self._signal_queue.put_nowait(signal)
+        except asyncio.QueueFull:
+            self.stats.signal_queue_drops += 1
+            return False
+        
+        self.stats.max_signal_queue_depth = max(
+            self.stats.max_signal_queue_depth,
+            self._signal_queue.qsize(),
+        )
+        return True
     
     async def _process_signals(self) -> None:
         """Main signal processing loop."""
@@ -140,8 +173,11 @@ class ExecutionEngine:
                 except asyncio.TimeoutError:
                     continue
                 
-                await self._execute_signal(signal)
-                self.stats.signals_processed += 1
+                try:
+                    await self._execute_signal(signal)
+                    self.stats.signals_processed += 1
+                finally:
+                    self._signal_queue.task_done()
                 
             except asyncio.CancelledError:
                 raise
@@ -427,4 +463,9 @@ class ExecutionEngine:
     def open_order_count(self) -> int:
         """Get number of open orders."""
         return len(self._open_orders)
+    
+    @property
+    def signal_queue_size(self) -> int:
+        """Get current queued signal count."""
+        return self._signal_queue.qsize()
 

@@ -593,6 +593,7 @@ class CrossPlatformArbEngine:
         polymarket_taker_fee: float = 0.015,  # 1.5%
         kalshi_taker_fee: float = 0.01,  # ~1% estimate
         gas_cost: float = 0.02,  # Gas cost per order
+        match_min_similarity: float = 0.5,
     ):
         """
         Initialize cross-platform arb engine.
@@ -602,13 +603,14 @@ class CrossPlatformArbEngine:
             polymarket_taker_fee: Polymarket taker fee rate
             kalshi_taker_fee: Kalshi taker fee rate
             gas_cost: Estimated gas cost per order
+            match_min_similarity: Similarity threshold for market matching
         """
         self.min_edge = min_edge
         self.polymarket_taker_fee = polymarket_taker_fee
         self.kalshi_taker_fee = kalshi_taker_fee
         self.gas_cost = gas_cost
         
-        self.matcher = MarketMatcher()
+        self.matcher = MarketMatcher(min_similarity=match_min_similarity)
         self._opportunities: list[CrossPlatformOpportunity] = []
         self._opportunity_count = 0
     

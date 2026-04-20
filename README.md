@@ -139,6 +139,12 @@ risk:
   max_daily_loss: 10
 ```
 
+For full observation mode (dashboard + real market data + auto-discovery), use:
+
+```bash
+python run_with_dashboard.py -c config.observation.yaml
+```
+
 ### 3. Run
 Bot only:
 
@@ -189,10 +195,11 @@ export POLYMARKET_PRIVATE_KEY="..."
 
 Important implementation notes:
 
-- `mode.min_match_similarity` exists in config but is not currently passed into `MarketMatcher`
 - `trading.maker_fee_bps`, `trading.taker_fee_bps`, and `trading.estimated_gas_per_order` are defined in config, but the entrypoints currently instantiate `ArbEngine` without forwarding those values
 - `logging.*` exists in config, but the entrypoints currently call `setup_logging(console_level=...)` with defaults rather than the full config block
 - `monitoring.heartbeat_interval` is defined but not used in the runtime loop
+- real-data feed tuning now comes from `monitoring.orderbook_*` fields (batch size, concurrency, and rotation delays)
+- dashboard payload size is intentionally capped for `/ws` and `/api/state`; use `/api/markets` for full market snapshots
 
 ## Dashboard
 The dashboard exposes:
@@ -234,9 +241,8 @@ Manual smoke checks:
 ```bash
 python test_real_data.py
 python test_connection.py -c config.yaml
+python test_connection.py -c config.observation.yaml
 ```
-
-Note: `test_connection.py` defaults to `config.live.yaml`, but that file is not present in this repository.
 
 ## Documentation
 Detailed docs live in `docs/`:

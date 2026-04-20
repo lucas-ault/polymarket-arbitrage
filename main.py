@@ -171,8 +171,8 @@ class TradingBot:
         
         for signal in signals:
             self._signal_count += 1
-            # Submit signal asynchronously
-            asyncio.create_task(self.execution_engine.submit_signal(signal))
+            if not self.execution_engine.submit_signal_nowait(signal):
+                logger.warning("Execution queue is full, dropping signal %s", signal.signal_id)
     
     async def _monitoring_loop(self) -> None:
         """Periodic monitoring and logging."""

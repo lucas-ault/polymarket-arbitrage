@@ -87,7 +87,7 @@ mode:
   cross_platform_match_start_delay_seconds: 5.0  # Delay matching startup to let feed warm up
   
   # Dry run settings
-  dry_run_initial_balance: 10000
+  dry_run_initial_balance: 50
   simulate_fills: true
   fill_probability: 0.8          # Probability of order being filled in dry run
 

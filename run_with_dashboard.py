@@ -70,6 +70,9 @@ class TradingBotWithDashboard:
         # Server
         self._server = None
         self._server_task = None
+        self._kalshi_task = None
+        self._fill_task = None
+        self._stopping = False
     
     async def start(self) -> None:
         """Start the bot and dashboard."""
@@ -122,7 +125,7 @@ class TradingBotWithDashboard:
             self.market_matcher = self.cross_platform_engine.matcher
             
             # Start Kalshi monitoring in background
-            asyncio.create_task(self._start_kalshi_monitoring())
+            self._kalshi_task = asyncio.create_task(self._start_kalshi_monitoring(), name="kalshi_monitoring")
         
         # Initialize portfolio
         initial_balance = (
@@ -194,7 +197,7 @@ class TradingBotWithDashboard:
         
         # Start fill simulation for dry run
         if self.config.is_dry_run and self.config.mode.simulate_fills:
-            asyncio.create_task(self._simulate_fills())
+            self._fill_task = asyncio.create_task(self._simulate_fills(), name="simulate_fills")
         
         # Start the web server
         await self._start_server()
@@ -437,8 +440,33 @@ class TradingBotWithDashboard:
     
     async def stop(self) -> None:
         """Stop everything gracefully."""
+        if self._stopping:
+            return
+        self._stopping = True
+        
         logger.info("Shutting down...")
         self._running = False
+        
+        if self._fill_task:
+            self._fill_task.cancel()
+            try:
+                await self._fill_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self._kalshi_task:
+            self._kalshi_task.cancel()
+            try:
+                await self._kalshi_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self._matching_task:
+            self._matching_task.cancel()
+            try:
+                await self._matching_task
+            except asyncio.CancelledError:
+                pass
         
         if self.dashboard_integration:
             await self.dashboard_integration.stop()
@@ -452,17 +480,20 @@ class TradingBotWithDashboard:
         if self.client:
             await self.client.disconnect()
         
-        if self._matching_task:
-            self._matching_task.cancel()
-            try:
-                await self._matching_task
-            except asyncio.CancelledError:
-                pass
-        
         # Kalshi client is closed via async context manager in _start_kalshi_monitoring
         
         if self._server:
             self._server.should_exit = True
+        
+        if self._server_task:
+            try:
+                await asyncio.wait_for(self._server_task, timeout=10.0)
+            except asyncio.TimeoutError:
+                self._server_task.cancel()
+                try:
+                    await self._server_task
+                except asyncio.CancelledError:
+                    pass
         
         # Final summary
         if self.portfolio:
@@ -512,6 +543,7 @@ async def main_async(args: argparse.Namespace) -> None:
     # Handle shutdown
     loop = asyncio.get_event_loop()
     shutdown_event = asyncio.Event()
+    quit_task = None
     
     def signal_handler():
         logger.info("Shutdown signal received")
@@ -526,12 +558,37 @@ async def main_async(args: argparse.Namespace) -> None:
     try:
         await bot.start()
         
+        if sys.stdin and sys.stdin.isatty():
+            logger.info("Type 'q' and press Enter to quit.")
+            
+            async def quit_listener() -> None:
+                while not shutdown_event.is_set():
+                    try:
+                        line = await asyncio.to_thread(sys.stdin.readline)
+                    except Exception:
+                        return
+                    if not line:
+                        await asyncio.sleep(0.1)
+                        continue
+                    if line.strip().lower() in {"q", "quit", "exit", "stop"}:
+                        logger.info("Quit command received from terminal.")
+                        shutdown_event.set()
+                        return
+            
+            quit_task = asyncio.create_task(quit_listener(), name="quit_listener")
+        
         # Wait for shutdown
         await shutdown_event.wait()
         
     except KeyboardInterrupt:
         pass
     finally:
+        if quit_task:
+            quit_task.cancel()
+            try:
+                await quit_task
+            except asyncio.CancelledError:
+                pass
         await bot.stop()
 
 

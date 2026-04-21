@@ -62,6 +62,8 @@ def _build_risk_manager(config: BotConfig) -> RiskManager:
         blacklist=list(config.risk.blacklist),
         kill_switch_enabled=config.risk.kill_switch_enabled,
         auto_unwind_on_breach=config.risk.auto_unwind_on_breach,
+        allow_urgent_exit_after_kill_switch=config.risk.allow_urgent_exit_after_kill_switch,
+        allow_urgent_exit_on_stale_data=config.risk.allow_urgent_exit_on_stale_data,
     ))
 
 
@@ -75,6 +77,11 @@ def _build_arb_engine(config: BotConfig) -> ArbEngine:
         mm_min_price=config.trading.mm_min_price,
         mm_max_price=config.trading.mm_max_price,
         mm_cooldown_seconds=config.trading.mm_cooldown_seconds,
+        taker_enabled=config.trading.taker_enabled,
+        taker_min_edge_after_fees=config.trading.taker_min_edge_after_fees,
+        taker_max_slippage_ticks=config.trading.taker_max_slippage_ticks,
+        taker_cooldown_seconds=config.trading.taker_cooldown_seconds,
+        taker_order_size=config.trading.taker_order_size,
         mm_invalidation_grace_seconds=config.trading.mm_invalidation_grace_seconds,
         mm_invalidation_min_updates=config.trading.mm_invalidation_min_updates,
         mm_enabled=config.trading.mm_enabled,

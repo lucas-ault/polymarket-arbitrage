@@ -66,6 +66,17 @@ class TradingConfig:
     mm_max_price: float = 0.90
     # How long to suppress repeat MM signals on the same (market, token).
     mm_cooldown_seconds: float = 5.0
+    # Optional aggressive taker-entry strategy that crosses the spread with
+    # IOC/FOK style orders. Runs alongside MM when enabled.
+    taker_enabled: bool = False
+    # Required post-fee edge before taker-entry fires.
+    taker_min_edge_after_fees: float = 0.01
+    # Max ticks we allow taker-entry pricing to cross past top-of-book.
+    taker_max_slippage_ticks: int = 2
+    # Cooldown before re-emitting taker-entry on same (market, token).
+    taker_cooldown_seconds: float = 5.0
+    # Fixed contract count for taker entries.
+    taker_order_size: float = 1.0
     # Require MM invalidation to persist briefly before canceling.
     mm_invalidation_grace_seconds: float = 1.0
     mm_invalidation_min_updates: int = 2
@@ -81,6 +92,12 @@ class TradingConfig:
     # found", 404), the execution engine drops further attempts on it for
     # this many seconds. Set to 0 to disable.
     unplaceable_market_skip_seconds: float = 300.0
+    # If true, urgent exits can still be sent after kill-switch trips.
+    urgent_exit_enabled: bool = False
+    # Prefer close-position endpoint for urgent exits when possible.
+    urgent_exit_use_close_position: bool = True
+    # Fallback urgent exits use IOC limits crossing up to this many ticks.
+    urgent_exit_max_slippage_ticks: int = 4
     fee_mode: str = "polymarket_us"
     maker_fee_bps: float = -125.0
     taker_fee_bps: float = 500.0
@@ -108,6 +125,8 @@ class RiskConfig:
     blacklist: list[str] = field(default_factory=list)
     kill_switch_enabled: bool = True
     auto_unwind_on_breach: bool = False
+    allow_urgent_exit_after_kill_switch: bool = True
+    allow_urgent_exit_on_stale_data: bool = True
 
 
 @dataclass
@@ -364,10 +383,20 @@ def _validate_config(config: BotConfig) -> None:
     
     if config.trading.default_order_size <= 0:
         errors.append("trading.default_order_size must be positive")
+    if config.trading.taker_min_edge_after_fees < 0:
+        errors.append("trading.taker_min_edge_after_fees must be non-negative")
+    if config.trading.taker_max_slippage_ticks < 0:
+        errors.append("trading.taker_max_slippage_ticks must be non-negative")
+    if config.trading.taker_cooldown_seconds < 0:
+        errors.append("trading.taker_cooldown_seconds must be non-negative")
+    if config.trading.taker_order_size <= 0:
+        errors.append("trading.taker_order_size must be positive")
     if config.trading.mm_invalidation_grace_seconds < 0:
         errors.append("trading.mm_invalidation_grace_seconds must be non-negative")
     if config.trading.mm_invalidation_min_updates < 1:
         errors.append("trading.mm_invalidation_min_updates must be at least 1")
+    if config.trading.urgent_exit_max_slippage_ticks < 0:
+        errors.append("trading.urgent_exit_max_slippage_ticks must be non-negative")
     if config.trading.auto_take_profit_profit_threshold_usd < 0:
         errors.append("trading.auto_take_profit_profit_threshold_usd must be non-negative")
     if config.trading.auto_take_profit_cooldown_seconds < 0:

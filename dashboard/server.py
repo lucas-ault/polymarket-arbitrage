@@ -1560,6 +1560,14 @@ def get_embedded_html() -> str:
                         <div class="op-stat-value" id="unplaceableMarkets">0</div>
                         <div class="op-stat-label">Unplaceable Markets</div>
                     </div>
+                    <div class="op-stat">
+                        <div class="op-stat-value" id="takerOppsDetected">0</div>
+                        <div class="op-stat-label">Taker Opps Detected</div>
+                    </div>
+                    <div class="op-stat">
+                        <div class="op-stat-value" id="takerOpenOrders">0</div>
+                        <div class="op-stat-label">Taker Open Orders</div>
+                    </div>
                 </div>
                 <div class="uptime-display">
                     <span style="color: var(--text-secondary); font-size: 0.75rem;">UPTIME: </span>
@@ -2107,6 +2115,8 @@ def get_embedded_html() -> str:
             document.getElementById('mmEligibleLegs').textContent = op.mm_eligible_legs || 0;
             document.getElementById('mmQuotedMarkets').textContent = op.mm_quoted_markets || 0;
             document.getElementById('unplaceableMarkets').textContent = op.unplaceable_markets || 0;
+            document.getElementById('takerOppsDetected').textContent = op.taker_opportunities_detected || 0;
+            document.getElementById('takerOpenOrders').textContent = op.taker_open_orders || 0;
             
             // Calculate updates per minute
             const now = Date.now();

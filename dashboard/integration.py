@@ -232,6 +232,11 @@ class DashboardIntegration:
                 "slippage_rejections": stats.slippage_rejections,
                 "unplaceable_signal_skips": stats.unplaceable_signal_skips,
                 "signals_processed": stats.signals_processed,
+                "taker_orders_attempted": stats.taker_orders_attempted,
+                "taker_orders_filled": stats.taker_orders_filled,
+                "taker_orders_rejected": stats.taker_orders_rejected,
+                "urgent_exit_attempted": stats.urgent_exit_attempted,
+                "urgent_exit_rejected": stats.urgent_exit_rejected,
             }
         
         # Update arb stats and timing
@@ -240,6 +245,7 @@ class DashboardIntegration:
             dashboard_state.stats.update({
                 "bundle_opportunities": arb_stats.bundle_opportunities_detected,
                 "mm_opportunities": arb_stats.mm_opportunities_detected,
+                "taker_opportunities": arb_stats.taker_opportunities_detected,
                 "signals_generated": arb_stats.signals_generated,
             })
             
@@ -300,6 +306,12 @@ class DashboardIntegration:
                 "is_streaming": self.data_feed.is_running,
                 "signal_queue_size": queue_size,
                 "unplaceable_markets": unplaceable_count,
+                "taker_open_orders": len([o for o in open_orders if o.strategy_tag == "taker_entry"]),
+                "taker_opportunities_detected": int(
+                    self.arb_engine.get_stats().taker_opportunities_detected
+                    if self.arb_engine
+                    else 0
+                ),
                 "avg_staleness_seconds": staleness["avg_staleness_seconds"],
                 "p95_staleness_seconds": staleness["p95_staleness_seconds"],
                 "max_staleness_seconds": staleness["max_staleness_seconds"],

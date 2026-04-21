@@ -45,6 +45,10 @@ class RiskConfig:
     # trip. The intent is to cancel resting orders so we are not exposed to
     # adverse fills while we figure out what happened.
     auto_unwind_on_breach: bool = False
+    # Allow reduce-only urgent exits to continue after kill switch triggers.
+    allow_urgent_exit_after_kill_switch: bool = True
+    # Allow reduce-only urgent exits even when market freshness is stale.
+    allow_urgent_exit_on_stale_data: bool = True
 
 
 KillSwitchCallback = Callable[[str], Union[None, Awaitable[None]]]
@@ -117,6 +121,9 @@ class RiskManager:
         
         Returns True if the order is allowed, False otherwise.
         """
+        if self._is_urgent_exit_order(order):
+            return self._check_urgent_exit(order)
+
         # Kill switch check
         if self.state.kill_switch_triggered:
             logger.warning(f"Order rejected: kill switch triggered ({self.state.kill_switch_reason})")
@@ -205,6 +212,40 @@ class RiskManager:
             return False
         
         return True
+
+    def _is_urgent_exit_order(self, order: Order) -> bool:
+        return str(getattr(order, "strategy_tag", "") or "") == "urgent_exit"
+
+    def _check_urgent_exit(self, order: Order) -> bool:
+        """Allow tagged urgent exits when they are reduce-only."""
+        if self.state.kill_switch_triggered and not self.config.allow_urgent_exit_after_kill_switch:
+            logger.warning("Urgent exit rejected: kill-switch bypass disabled")
+            return False
+
+        if not self._is_reduce_only_order(order):
+            logger.warning(
+                "Urgent exit rejected: order is not reduce-only for market %s",
+                order.market_id,
+            )
+            return False
+
+        if self.config.max_market_staleness_seconds > 0 and not self.config.allow_urgent_exit_on_stale_data:
+            last_seen = self._market_freshness.get(order.market_id)
+            if last_seen is not None:
+                staleness = (datetime.utcnow() - last_seen).total_seconds()
+                if staleness > self.config.max_market_staleness_seconds:
+                    logger.warning(
+                        "Urgent exit rejected: market %s stale and bypass disabled (%.2fs > %.2fs)",
+                        order.market_id,
+                        staleness,
+                        self.config.max_market_staleness_seconds,
+                    )
+                    return False
+
+        return True
+
+    def _is_reduce_only_order(self, order: Order) -> bool:
+        return self._estimate_incremental_exposure(order) <= 0
     
     def update_position(
         self,

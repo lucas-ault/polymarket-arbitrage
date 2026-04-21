@@ -40,6 +40,7 @@ class OpportunityType(Enum):
     BUNDLE_SHORT = "bundle_short"  # Sell YES + NO when sum > 1
     MM_BID = "mm_bid"              # Market-making bid placement
     MM_ASK = "mm_ask"              # Market-making ask placement
+    TAKER_ENTRY = "taker_entry"    # IOC taker entry
 
 
 @dataclass
@@ -213,6 +214,8 @@ class Order:
     quote_group_id: str = ""
     filled_size: float = 0.0
     status: OrderStatus = OrderStatus.PENDING
+    order_type: str = "ORDER_TYPE_LIMIT"
+    time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
     
     # Metadata
     strategy_tag: str = ""  # e.g., "bundle_arb", "mm"
@@ -238,6 +241,14 @@ class Order:
     def notional(self) -> float:
         """Calculate notional value."""
         return self.price * self.size
+
+    @property
+    def is_ioc_or_fok(self) -> bool:
+        tif = (self.time_in_force or "").upper()
+        return tif in {
+            "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "TIME_IN_FORCE_FILL_OR_KILL",
+        }
 
 
 @dataclass

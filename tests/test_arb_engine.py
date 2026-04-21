@@ -282,6 +282,60 @@ class TestMarketMaking:
         assert expired == []
 
 
+class TestTakerEntry:
+    def test_taker_entry_emits_ioc_signal_when_edge_survives_fees(self, arb_engine: ArbEngine):
+        arb_engine.config.taker_enabled = True
+        arb_engine.config.taker_min_edge_after_fees = 0.01
+        arb_engine.config.fee_theta_taker = 0.0
+        arb_engine.config.taker_order_size = 3.0
+        arb_engine.config.min_order_size = 1.0
+        arb_engine.config.max_order_size = 10.0
+        arb_engine.config.min_spread = 0.01
+
+        order_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.45,
+            yes_ask=0.47,
+            no_bid=0.52,
+            no_ask=0.54,
+        )
+        state = create_market_state(order_book)
+        state.market.yes_price = 0.60
+
+        signals = arb_engine.analyze(state)
+        taker_signals = [s for s in signals if any(o.get("strategy_tag") == "taker_entry" for o in s.orders)]
+
+        assert taker_signals
+        order = taker_signals[0].orders[0]
+        assert order["time_in_force"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+        assert order["order_type"] == "ORDER_TYPE_LIMIT"
+
+    def test_taker_entry_respects_cooldown(self, arb_engine: ArbEngine):
+        arb_engine.config.taker_enabled = True
+        arb_engine.config.taker_min_edge_after_fees = 0.0
+        arb_engine.config.fee_theta_taker = 0.0
+        arb_engine.config.taker_cooldown_seconds = 30.0
+        arb_engine.config.min_spread = 0.01
+
+        order_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.45,
+            yes_ask=0.47,
+            no_bid=0.52,
+            no_ask=0.54,
+        )
+        state = create_market_state(order_book)
+        state.market.yes_price = 0.60
+
+        first = arb_engine.analyze(state)
+        second = arb_engine.analyze(state)
+        first_taker = [s for s in first if any(o.get("strategy_tag") == "taker_entry" for o in s.orders)]
+        second_taker = [s for s in second if any(o.get("strategy_tag") == "taker_entry" for o in s.orders)]
+
+        assert first_taker
+        assert second_taker == []
+
+
 class TestSignalGeneration:
     """Tests for signal generation."""
     

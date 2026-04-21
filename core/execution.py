@@ -65,6 +65,11 @@ class ExecutionStats:
     unplaceable_signal_skips: int = 0
     signal_queue_drops: int = 0
     max_signal_queue_depth: int = 0
+    taker_orders_attempted: int = 0
+    taker_orders_filled: int = 0
+    taker_orders_rejected: int = 0
+    urgent_exit_attempted: int = 0
+    urgent_exit_rejected: int = 0
 
 
 class ExecutionEngine:
@@ -260,6 +265,7 @@ class ExecutionEngine:
             return
 
         for order_spec in signal.orders:
+            strategy_tag = ""
             try:
                 # Extract order parameters
                 token_type = order_spec["token_type"]
@@ -268,11 +274,18 @@ class ExecutionEngine:
                 size = order_spec["size"]
                 strategy_tag = order_spec.get("strategy_tag", "")
                 quote_group_id = order_spec.get("quote_group_id", "")
+                order_type = str(order_spec.get("order_type", "ORDER_TYPE_LIMIT"))
+                time_in_force = str(
+                    order_spec.get("time_in_force", "TIME_IN_FORCE_GOOD_TILL_CANCEL")
+                )
+                use_close_position = bool(order_spec.get("close_position", False))
+                slippage_ticks = order_spec.get("slippage_ticks")
                 
                 # Check slippage if enabled
                 if self.config.enable_slippage_check and signal.opportunity:
                     if not self._check_slippage(signal.opportunity, order_spec):
                         self.stats.slippage_rejections += 1
+                        self._note_strategy_rejection(strategy_tag)
                         logger.warning(f"Order rejected due to slippage: {order_spec}")
                         trade_logger.log_order_rejected(
                             market_id=signal.market_id,
@@ -295,10 +308,13 @@ class ExecutionEngine:
                     size=size,
                     strategy_tag=strategy_tag,
                     quote_group_id=quote_group_id,
+                    order_type=order_type,
+                    time_in_force=time_in_force,
                 )
                 
                 if not self.risk_manager.check_order(proposed_order):
                     self.stats.signals_rejected += 1
+                    self._note_strategy_rejection(strategy_tag)
                     logger.warning(f"Order rejected by risk manager: {order_spec}")
                     trade_logger.log_order_rejected(
                         market_id=signal.market_id,
@@ -311,6 +327,22 @@ class ExecutionEngine:
                     )
                     continue
                 
+                if use_close_position:
+                    if await self._close_position(
+                        market_id=signal.market_id,
+                        strategy_tag=strategy_tag or "urgent_exit",
+                        side=side,
+                        token_type=token_type,
+                        size=size,
+                        current_price=price,
+                        slippage_ticks=int(slippage_ticks) if slippage_ticks is not None else None,
+                    ):
+                        if strategy_tag == "urgent_exit":
+                            self.stats.urgent_exit_attempted += 1
+                        self.stats.orders_placed += 1
+                        self.stats.total_notional += float(price) * float(size)
+                        continue
+
                 # Place the order
                 order = await self._place_order(
                     market_id=signal.market_id,
@@ -319,16 +351,20 @@ class ExecutionEngine:
                     price=price,
                     size=size,
                     strategy_tag=strategy_tag,
+                    order_type=order_type,
+                    time_in_force=time_in_force,
                 )
                 
                 if order:
                     order.quote_group_id = quote_group_id
                     self._track_order(order)
+                    self._note_strategy_placement(order.strategy_tag)
                     self.stats.orders_placed += 1
                     self.stats.total_notional += order.notional
                     
             except Exception as e:
                 logger.error(f"Failed to place order: {e}")
+                self._note_strategy_rejection(strategy_tag)
                 self.stats.orders_rejected += 1
     
     async def _handle_cancel_orders(self, signal: Signal) -> None:
@@ -395,6 +431,8 @@ class ExecutionEngine:
         price: float,
         size: float,
         strategy_tag: str = "",
+        order_type: str = "ORDER_TYPE_LIMIT",
+        time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> Optional[Order]:
         """Place an order through the API with retry logic."""
         last_error: Optional[BaseException] = None
@@ -408,11 +446,14 @@ class ExecutionEngine:
                     price=price,
                     size=size,
                     strategy_tag=strategy_tag,
+                    order_type=order_type,
+                    time_in_force=time_in_force,
                 )
 
                 logger.info(
                     f"Order placed: {order.order_id} | "
-                    f"{side.value} {size:.2f} {token_type.value} @ {price:.4f}"
+                    f"{side.value} {size:.2f} {token_type.value} @ {price:.4f} | "
+                    f"type={order.order_type} tif={order.time_in_force}"
                 )
                 trade_logger.log_order_placed(
                     order_id=order.order_id,
@@ -448,6 +489,55 @@ class ExecutionEngine:
             self.config.max_retries, market_id, last_error,
         )
         return None
+
+    async def _close_position(
+        self,
+        *,
+        market_id: str,
+        strategy_tag: str,
+        side: OrderSide,
+        token_type: TokenType,
+        size: float,
+        current_price: float,
+        slippage_ticks: Optional[int],
+    ) -> bool:
+        """Attempt exchange close-position endpoint for urgent exits."""
+        try:
+            await self.client.close_position(
+                market_id=market_id,
+                slippage_ticks=slippage_ticks,
+                current_price=current_price,
+            )
+            logger.info("Close-position submitted: market=%s", market_id)
+            trade_logger.log_order_placed(
+                order_id=f"close_position_{uuid.uuid4().hex[:10]}",
+                market_id=market_id,
+                side=side.value,
+                token=token_type.value,
+                price=current_price,
+                size=size,
+                strategy=strategy_tag,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "Close-position failed for %s, falling back to order placement: %s",
+                market_id,
+                exc,
+            )
+            return False
+
+    def _note_strategy_placement(self, strategy_tag: str) -> None:
+        if strategy_tag == "taker_entry":
+            self.stats.taker_orders_attempted += 1
+        elif strategy_tag == "urgent_exit":
+            self.stats.urgent_exit_attempted += 1
+
+    def _note_strategy_rejection(self, strategy_tag: str) -> None:
+        if strategy_tag == "taker_entry":
+            self.stats.taker_orders_rejected += 1
+        elif strategy_tag == "urgent_exit":
+            self.stats.urgent_exit_rejected += 1
     
     def _track_order(self, order: Order) -> None:
         """Add order to tracking structures."""
@@ -459,6 +549,8 @@ class ExecutionEngine:
                 0.5,
                 float(getattr(self.config, "mm_order_timeout_seconds", timeout_seconds) or timeout_seconds),
             )
+        elif order.is_ioc_or_fok:
+            timeout_seconds = 2.0
         self._order_timeouts_seconds[order.order_id] = timeout_seconds
         
         # Track by market
@@ -644,6 +736,8 @@ class ExecutionEngine:
                 order.status = OrderStatus.FILLED
                 self._untrack_order(order_id)
                 self.stats.orders_filled += 1
+                if order.strategy_tag == "taker_entry":
+                    self.stats.taker_orders_filled += 1
             else:
                 order.status = OrderStatus.PARTIALLY_FILLED
         

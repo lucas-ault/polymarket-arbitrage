@@ -114,3 +114,17 @@ api:
     config = load_config(str(config_path))
     assert config.is_live is True
     assert config.mode.simulate_fills is False
+
+
+def test_invalid_taker_order_size_raises(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    _write_config(
+        config_path,
+        """
+trading:
+  taker_enabled: true
+  taker_order_size: 0
+""",
+    )
+    with pytest.raises(ConfigError):
+        load_config(str(config_path))

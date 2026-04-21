@@ -102,6 +102,13 @@ class TradingBot:
                 cooldown_seconds=float(
                     self.config.trading.auto_take_profit_cooldown_seconds
                 ),
+                urgent_exit_enabled=bool(self.config.trading.urgent_exit_enabled),
+                urgent_exit_use_close_position=bool(
+                    self.config.trading.urgent_exit_use_close_position
+                ),
+                urgent_exit_max_slippage_ticks=int(
+                    self.config.trading.urgent_exit_max_slippage_ticks
+                ),
             ),
             self.execution_engine,
             self.portfolio,

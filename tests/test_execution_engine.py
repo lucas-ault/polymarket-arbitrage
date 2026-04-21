@@ -218,3 +218,115 @@ async def test_handle_place_orders_counts_unplaceable_skip():
     assert engine.stats.signals_rejected == 1
     assert engine.stats.unplaceable_signal_skips == 1
     assert engine.unplaceable_market_count == 1
+
+
+@pytest.mark.asyncio
+async def test_ioc_taker_orders_use_short_timeout_and_stats():
+    class CapturingClient(DummyClient):
+        async def place_order(self, **kwargs):
+            return Order(
+                order_id="ioc-1",
+                market_id=kwargs["market_id"],
+                token_type=kwargs["token_type"],
+                side=kwargs["side"],
+                price=kwargs["price"],
+                size=kwargs["size"],
+                strategy_tag=kwargs.get("strategy_tag", ""),
+                order_type=kwargs.get("order_type", "ORDER_TYPE_LIMIT"),
+                time_in_force=kwargs.get("time_in_force", "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
+            )
+
+    engine = ExecutionEngine(
+        client=CapturingClient(),
+        risk_manager=RiskManager(RiskConfig(trade_only_high_volume=False)),
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    signal = Signal(
+        signal_id="s-ioc",
+        action="place_orders",
+        market_id="m-1",
+        orders=[
+            {
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": 0.5,
+                "size": 1.0,
+                "strategy_tag": "taker_entry",
+                "order_type": "ORDER_TYPE_LIMIT",
+                "time_in_force": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            }
+        ],
+    )
+
+    await engine._handle_place_orders(signal)
+
+    assert engine.stats.taker_orders_attempted == 1
+    assert engine.open_order_count == 1
+    assert engine._order_timeouts_seconds["ioc-1"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_urgent_exit_close_position_falls_back_to_ioc_order():
+    class CapturingClient(DummyClient):
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self.place_calls = 0
+
+        async def close_position(self, *args, **kwargs):
+            self.close_calls += 1
+            raise RuntimeError("close-position unavailable")
+
+        async def place_order(self, **kwargs):
+            self.place_calls += 1
+            return Order(
+                order_id="urg-1",
+                market_id=kwargs["market_id"],
+                token_type=kwargs["token_type"],
+                side=kwargs["side"],
+                price=kwargs["price"],
+                size=kwargs["size"],
+                strategy_tag=kwargs.get("strategy_tag", ""),
+                order_type=kwargs.get("order_type", "ORDER_TYPE_LIMIT"),
+                time_in_force=kwargs.get("time_in_force", "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
+            )
+
+    risk = RiskManager(
+        RiskConfig(
+            trade_only_high_volume=False,
+            allow_urgent_exit_after_kill_switch=True,
+            allow_urgent_exit_on_stale_data=True,
+        )
+    )
+    risk.update_position("m-1", TokenType.YES, 1.0, 0.5)
+    client = CapturingClient()
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=risk,
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    signal = Signal(
+        signal_id="s-urgent",
+        action="place_orders",
+        market_id="m-1",
+        orders=[
+            {
+                "token_type": TokenType.YES,
+                "side": OrderSide.SELL,
+                "price": 0.5,
+                "size": 1.0,
+                "strategy_tag": "urgent_exit",
+                "order_type": "ORDER_TYPE_LIMIT",
+                "time_in_force": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                "close_position": True,
+                "slippage_ticks": 3,
+            }
+        ],
+    )
+
+    await engine._handle_place_orders(signal)
+
+    assert client.close_calls == 1
+    assert client.place_calls == 1
+    assert engine.stats.urgent_exit_attempted == 1

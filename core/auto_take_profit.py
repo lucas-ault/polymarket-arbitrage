@@ -24,6 +24,9 @@ class AutoTakeProfitConfig:
     enabled: bool = False
     min_net_profit_usd: float = 0.20
     cooldown_seconds: float = 15.0
+    urgent_exit_enabled: bool = False
+    urgent_exit_use_close_position: bool = True
+    urgent_exit_max_slippage_ticks: int = 4
 
 
 class AutoTakeProfitMonitor:
@@ -102,13 +105,12 @@ class AutoTakeProfitMonitor:
                 action="place_orders",
                 market_id=market_id,
                 orders=[
-                    {
-                        "token_type": token_type,
-                        "side": exit_side,
-                        "price": exit_price,
-                        "size": abs(size),
-                        "strategy_tag": "take_profit",
-                    }
+                    self._build_exit_order_spec(
+                        token_type=token_type,
+                        side=exit_side,
+                        price=exit_price,
+                        size=abs(size),
+                    )
                 ],
                 priority=30,
             )
@@ -187,6 +189,34 @@ class AutoTakeProfitMonitor:
             if side == OrderSide.BUY and order_book.best_ask_no is not None
             else None
         )
+
+    def _build_exit_order_spec(
+        self,
+        *,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+    ) -> dict[str, Any]:
+        if self.config.urgent_exit_enabled:
+            return {
+                "token_type": token_type,
+                "side": side,
+                "price": float(price),
+                "size": float(size),
+                "strategy_tag": "urgent_exit",
+                "order_type": "ORDER_TYPE_LIMIT",
+                "time_in_force": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                "close_position": bool(self.config.urgent_exit_use_close_position),
+                "slippage_ticks": int(max(0, self.config.urgent_exit_max_slippage_ticks)),
+            }
+        return {
+            "token_type": token_type,
+            "side": side,
+            "price": float(price),
+            "size": float(size),
+            "strategy_tag": "take_profit",
+        }
 
     def _estimate_net_exit_profit(self, position: PortfolioPosition, exit_price: float) -> float:
         """Estimate full-exit PnL after entry and exit fees."""

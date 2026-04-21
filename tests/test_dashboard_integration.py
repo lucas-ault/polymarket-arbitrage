@@ -186,6 +186,11 @@ async def test_update_state_includes_mm_and_unplaceable_operational_metrics():
                     "slippage_rejections": 0,
                     "unplaceable_signal_skips": 4,
                     "signals_processed": 0,
+                    "taker_orders_attempted": 2,
+                    "taker_orders_filled": 1,
+                    "taker_orders_rejected": 1,
+                    "urgent_exit_attempted": 3,
+                    "urgent_exit_rejected": 0,
                 },
             )()
 
@@ -197,6 +202,7 @@ async def test_update_state_includes_mm_and_unplaceable_operational_metrics():
                 {
                     "bundle_opportunities_detected": 0,
                     "mm_opportunities_detected": 0,
+                    "taker_opportunities_detected": 5,
                     "signals_generated": 0,
                 },
             )()
@@ -224,4 +230,6 @@ async def test_update_state_includes_mm_and_unplaceable_operational_metrics():
     assert dashboard_state.operational["mm_eligible_legs"] == 2
     assert dashboard_state.operational["mm_quoted_markets"] == 0
     assert dashboard_state.operational["unplaceable_markets"] == 2
+    assert dashboard_state.operational["taker_opportunities_detected"] == 5
     assert dashboard_state.stats["unplaceable_signal_skips"] == 4
+    assert dashboard_state.stats["taker_orders_attempted"] == 2

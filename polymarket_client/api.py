@@ -86,7 +86,19 @@ class BasePolymarketClient(ABC):
         price: float,
         size: float,
         strategy_tag: str = "",
+        order_type: str = "ORDER_TYPE_LIMIT",
+        time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> Order:
+        pass
+
+    @abstractmethod
+    async def close_position(
+        self,
+        market_id: str,
+        *,
+        slippage_ticks: Optional[int] = None,
+        current_price: Optional[float] = None,
+    ) -> dict[str, Any]:
         pass
 
     @abstractmethod
@@ -1270,6 +1282,36 @@ class PolymarketClient(BasePolymarketClient):
             return "ORDER_INTENT_SELL_LONG"
         return "ORDER_INTENT_SELL_SHORT"
 
+    @staticmethod
+    def _normalize_order_type(value: str) -> str:
+        key = str(value or "").strip().lower()
+        aliases = {
+            "limit": "ORDER_TYPE_LIMIT",
+            "order_type_limit": "ORDER_TYPE_LIMIT",
+            "market": "ORDER_TYPE_MARKET",
+            "order_type_market": "ORDER_TYPE_MARKET",
+        }
+        return aliases.get(key, "ORDER_TYPE_LIMIT")
+
+    @staticmethod
+    def _normalize_time_in_force(value: str) -> str:
+        key = str(value or "").strip().lower()
+        aliases = {
+            "gtc": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "good_till_cancel": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "time_in_force_good_till_cancel": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "ioc": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "immediate_or_cancel": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "time_in_force_immediate_or_cancel": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            "fok": "TIME_IN_FORCE_FILL_OR_KILL",
+            "fill_or_kill": "TIME_IN_FORCE_FILL_OR_KILL",
+            "time_in_force_fill_or_kill": "TIME_IN_FORCE_FILL_OR_KILL",
+            "gtd": "TIME_IN_FORCE_GOOD_TILL_DATE",
+            "good_till_date": "TIME_IN_FORCE_GOOD_TILL_DATE",
+            "time_in_force_good_till_date": "TIME_IN_FORCE_GOOD_TILL_DATE",
+        }
+        return aliases.get(key, "TIME_IN_FORCE_GOOD_TILL_CANCEL")
+
     async def get_positions(self) -> dict[str, dict[TokenType, Position]]:
         if self.dry_run:
             return self._simulated_positions.copy()
@@ -1324,6 +1366,8 @@ class PolymarketClient(BasePolymarketClient):
         price: float,
         size: float,
         strategy_tag: str = "",
+        order_type: str = "ORDER_TYPE_LIMIT",
+        time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> Order:
         order_id = f"order_{uuid.uuid4().hex[:12]}"
         market = await self.get_market(market_id)
@@ -1337,6 +1381,8 @@ class PolymarketClient(BasePolymarketClient):
             size=size,
             status=OrderStatus.OPEN,
             strategy_tag=strategy_tag,
+            order_type=self._normalize_order_type(order_type),
+            time_in_force=self._normalize_time_in_force(time_in_force),
         )
         if self.dry_run:
             self._simulated_orders[order_id] = order
@@ -1362,15 +1408,18 @@ class PolymarketClient(BasePolymarketClient):
                 market.market_slug or market.market_id,
                 size_loss,
             )
+        normalized_order_type = order.order_type
+        normalized_tif = order.time_in_force
         payload = {
             "marketSlug": market.market_slug or market.market_id,
             "intent": intent,
-            "type": "ORDER_TYPE_LIMIT",
-            "price": {"value": f"{api_price:.4f}", "currency": "USD"},
+            "type": normalized_order_type,
             "quantity": rounded_quantity,
-            "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "tif": normalized_tif,
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
         }
+        if normalized_order_type == "ORDER_TYPE_LIMIT":
+            payload["price"] = {"value": f"{api_price:.4f}", "currency": "USD"}
         try:
             if self._sdk_client:
                 response = await self._sdk_client.orders.create(payload)
@@ -1387,11 +1436,14 @@ class PolymarketClient(BasePolymarketClient):
             return order
         except Exception as exc:
             logger.error(
-                "Failed to place order: %s | market_id=%s | market_slug=%s | intent=%s | price=%.4f | size=%d",
+                "Failed to place order: %s | market_id=%s | market_slug=%s | intent=%s | "
+                "type=%s | tif=%s | price=%.4f | size=%d",
                 exc,
                 market.market_id,
                 market.market_slug or market.market_id,
                 intent,
+                normalized_order_type,
+                normalized_tif,
                 api_price,
                 rounded_quantity,
             )
@@ -1466,6 +1518,42 @@ class PolymarketClient(BasePolymarketClient):
                 last_rest_error = exc
         if last_rest_error:
             raise last_rest_error
+
+    async def close_position(
+        self,
+        market_id: str,
+        *,
+        slippage_ticks: Optional[int] = None,
+        current_price: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Close an entire market position using the exchange close-position endpoint."""
+        market = await self.get_market(market_id)
+        market_slug = market.market_slug or market.market_id
+        payload: dict[str, Any] = {"marketSlug": market_slug}
+        if slippage_ticks is not None and slippage_ticks >= 0 and current_price is not None:
+            bounded_price = max(0.01, min(0.99, float(current_price)))
+            payload["slippageTolerance"] = {
+                "currentPrice": {"value": f"{bounded_price:.4f}", "currency": "USD"},
+                "ticks": int(slippage_ticks),
+            }
+
+        if self.dry_run:
+            return {"status": "simulated", "marketSlug": market_slug}
+
+        if self._sdk_client:
+            close_fn = getattr(self._sdk_client.orders, "close_position", None)
+            if close_fn is None:
+                close_fn = getattr(self._sdk_client.orders, "closePosition", None)
+            if close_fn is not None:
+                return await close_fn(payload)
+
+        response = await self._request(
+            "POST",
+            "/v1/order/close-position",
+            json_data=payload,
+            use_private=True,
+        )
+        return response if isinstance(response, dict) else {"response": response}
 
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
         orders = await self.get_open_orders(market_id)
@@ -1544,6 +1632,8 @@ class PolymarketClient(BasePolymarketClient):
                         size=float(item.get("quantity") or item.get("size") or 0.0),
                         filled_size=float(item.get("filledQuantity") or item.get("filled_size") or 0.0),
                         status=self._parse_order_status(item.get("state") or item.get("status")),
+                        order_type=str(item.get("type") or "ORDER_TYPE_LIMIT"),
+                        time_in_force=str(item.get("tif") or "TIME_IN_FORCE_GOOD_TILL_CANCEL"),
                     )
                 )
             return parsed

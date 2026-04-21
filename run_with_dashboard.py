@@ -129,6 +129,13 @@ class TradingBotWithDashboard:
                 cooldown_seconds=float(
                     self.config.trading.auto_take_profit_cooldown_seconds
                 ),
+                urgent_exit_enabled=bool(self.config.trading.urgent_exit_enabled),
+                urgent_exit_use_close_position=bool(
+                    self.config.trading.urgent_exit_use_close_position
+                ),
+                urgent_exit_max_slippage_ticks=int(
+                    self.config.trading.urgent_exit_max_slippage_ticks
+                ),
             ),
             self.execution_engine,
             self.portfolio,
@@ -398,12 +405,18 @@ class TradingBotWithDashboard:
                 orders_rejected = int(getattr(exec_stats, "orders_rejected", 0) or 0)
                 signals_rejected = int(getattr(exec_stats, "signals_rejected", 0) or 0)
                 unplaceable_skips = int(getattr(exec_stats, "unplaceable_signal_skips", 0) or 0)
+                taker_attempted = int(getattr(exec_stats, "taker_orders_attempted", 0) or 0)
+                taker_filled = int(getattr(exec_stats, "taker_orders_filled", 0) or 0)
+                taker_rejected = int(getattr(exec_stats, "taker_orders_rejected", 0) or 0)
+                urgent_exit_attempted = int(getattr(exec_stats, "urgent_exit_attempted", 0) or 0)
+                urgent_exit_rejected = int(getattr(exec_stats, "urgent_exit_rejected", 0) or 0)
                 open_orders = int(self.execution_engine.open_order_count) if self.execution_engine else 0
                 queue_depth = int(self.execution_engine.signal_queue_size) if self.execution_engine else 0
                 unplaceable_markets = (
                     int(self.execution_engine.unplaceable_market_count)
                     if self.execution_engine else 0
                 )
+                taker_detected = int(getattr(arb_stats, "taker_opportunities_detected", 0) or 0)
                 mm_metrics = {"mm_eligible_markets": 0, "mm_quoted_markets": 0}
                 if self.arb_engine and self.data_feed:
                     mm_metrics = self.arb_engine.get_market_making_metrics(
@@ -445,6 +458,8 @@ class TradingBotWithDashboard:
                     "orders_placed/filled=%d/%d (new placed in 60s=%d) | "
                     "open/cxl/rej/sigrej=%d/%d/%d/%d | queue=%d | "
                     "mm(pass/quoted)=%d/%d | unplaceable=%d | skip_unplaceable=%d | "
+                    "taker(det/att/fill/rej)=%d/%d/%d/%d | "
+                    "urgent_exit(att/rej)=%d/%d | "
                     "session PnL=$%.2f | exposure=$%.2f%s%s",
                     markets_tracked,
                     signal_count,
@@ -461,6 +476,12 @@ class TradingBotWithDashboard:
                     int(mm_metrics.get("mm_quoted_markets", 0)),
                     unplaceable_markets,
                     unplaceable_skips,
+                    taker_detected,
+                    taker_attempted,
+                    taker_filled,
+                    taker_rejected,
+                    urgent_exit_attempted,
+                    urgent_exit_rejected,
                     float(pnl.get("total_pnl", 0.0)),
                     float(exposure),
                     " | KILL SWITCH ACTIVE" if kill_switch else "",

@@ -57,6 +57,13 @@ class ArbConfig:
     mm_max_price: float = 0.90
     # Cooldown before re-emitting an MM signal for the same (market, token).
     mm_cooldown_seconds: float = 5.0
+    # Separate taker-entry mode. Crosses the spread with IOC limits when
+    # post-fee edge versus a fair-value proxy is strong enough.
+    taker_enabled: bool = False
+    taker_min_edge_after_fees: float = 0.01
+    taker_max_slippage_ticks: int = 2
+    taker_cooldown_seconds: float = 5.0
+    taker_order_size: float = 1.0
     # Require MM opportunities to stay invalid briefly before canceling live
     # quotes. This prevents a single noisy book update from tearing down a
     # quote set that only rested for a few hundred milliseconds.
@@ -108,6 +115,7 @@ class ArbStats:
     """Statistics for the arbitrage engine."""
     bundle_opportunities_detected: int = 0
     mm_opportunities_detected: int = 0
+    taker_opportunities_detected: int = 0
     signals_generated: int = 0
     last_opportunity_time: Optional[datetime] = None
 
@@ -228,6 +236,10 @@ class ArbEngine:
         if self.config.mm_enabled:
             mm_signals = self._check_market_making(market_id, order_book)
             signals.extend(mm_signals)
+
+        if self.config.taker_enabled:
+            taker_signals = self._check_taker_entries(market_state)
+            signals.extend(taker_signals)
         
         return signals
     
@@ -637,6 +649,143 @@ class ArbEngine:
             signals.append(no_signal)
         
         return signals
+
+    def _check_taker_entries(self, market_state: MarketState) -> list[Signal]:
+        """Generate IOC taker-entry signals when post-fee edge is strong."""
+        market_id = market_state.market.market_id
+        signals: list[Signal] = []
+        for token_type, token_book in (
+            (TokenType.YES, market_state.order_book.yes),
+            (TokenType.NO, market_state.order_book.no),
+        ):
+            signal = self._check_taker_token(
+                market_id=market_id,
+                token_book=token_book,
+                token_type=token_type,
+                fair_hint=(
+                    float(market_state.market.yes_price)
+                    if token_type == TokenType.YES
+                    else float(market_state.market.no_price)
+                ),
+            )
+            if signal is not None:
+                signals.append(signal)
+        return signals
+
+    def _check_taker_token(
+        self,
+        *,
+        market_id: str,
+        token_book,
+        token_type: TokenType,
+        fair_hint: float,
+    ) -> Optional[Signal]:
+        """Build one taker-entry IOC signal for a token side when edge permits."""
+        best_bid = token_book.best_bid
+        best_ask = token_book.best_ask
+        spread = token_book.spread
+        if best_bid is None or best_ask is None or spread is None:
+            return None
+        if spread < self.config.min_spread:
+            return None
+
+        if self._position_probe is not None:
+            try:
+                if abs(float(self._position_probe(market_id, token_type) or 0.0)) > 0:
+                    return None
+            except Exception:
+                logger.debug(
+                    "Position probe failed while evaluating taker-entry for %s/%s",
+                    market_id,
+                    token_type.value,
+                    exc_info=True,
+                )
+                return None
+
+        midpoint = (best_bid + best_ask) / 2.0
+        fair = float(fair_hint or 0.0)
+        if fair <= 0:
+            fair = midpoint
+
+        fee_buy = self._estimate_taker_fee(best_ask)
+        fee_sell = self._estimate_taker_fee(best_bid)
+        buy_edge = fair - best_ask - fee_buy
+        sell_edge = best_bid - fair - fee_sell
+        if buy_edge >= sell_edge:
+            side = OrderSide.BUY
+            edge = buy_edge
+            price = min(
+                0.99,
+                best_ask + max(0, int(self.config.taker_max_slippage_ticks)) * self.config.tick_size,
+            )
+        else:
+            side = OrderSide.SELL
+            edge = sell_edge
+            price = max(
+                0.01,
+                best_bid - max(0, int(self.config.taker_max_slippage_ticks)) * self.config.tick_size,
+            )
+
+        if edge < float(self.config.taker_min_edge_after_fees):
+            return None
+
+        cooldown_key = f"taker_{market_id}_{token_type.value}_{side.value}"
+        cooldown_until = self._opportunity_cooldown.get(cooldown_key)
+        if cooldown_until is not None and datetime.utcnow() < cooldown_until:
+            return None
+        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(
+            seconds=max(0.5, float(self.config.taker_cooldown_seconds))
+        )
+
+        order_size = max(
+            float(self.config.min_order_size),
+            min(float(self.config.max_order_size), float(self.config.taker_order_size)),
+        )
+        opportunity = Opportunity(
+            opportunity_id=f"taker_{token_type.value}_{uuid.uuid4().hex[:8]}",
+            opportunity_type=OpportunityType.TAKER_ENTRY,
+            market_id=market_id,
+            edge=float(edge),
+            best_bid_yes=best_bid if token_type == TokenType.YES else None,
+            best_ask_yes=best_ask if token_type == TokenType.YES else None,
+            best_bid_no=best_bid if token_type == TokenType.NO else None,
+            best_ask_no=best_ask if token_type == TokenType.NO else None,
+            suggested_size=order_size,
+            max_size=order_size,
+        )
+
+        self.stats.taker_opportunities_detected += 1
+        self.stats.last_opportunity_time = datetime.utcnow()
+        self.stats.signals_generated += 1
+        logger.info(
+            "Taker opportunity: %s/%s | side=%s | bid=%.4f ask=%.4f fair=%.4f | edge=%.4f | size=%.2f",
+            market_id,
+            token_type.value,
+            side.value,
+            best_bid,
+            best_ask,
+            fair,
+            edge,
+            order_size,
+        )
+        return Signal(
+            signal_id=f"sig_{uuid.uuid4().hex[:12]}",
+            action="place_orders",
+            market_id=market_id,
+            opportunity=opportunity,
+            orders=[
+                {
+                    "token_type": token_type,
+                    "side": side,
+                    "price": price,
+                    "size": order_size,
+                    "strategy_tag": "taker_entry",
+                    "order_type": "ORDER_TYPE_LIMIT",
+                    "time_in_force": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+                }
+            ],
+            priority=15,
+        )
 
     def _mm_conditions_hold(self, token_book) -> bool:
         """Return True if a token book still satisfies MM gating rules."""

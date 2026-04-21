@@ -387,8 +387,14 @@ class PolymarketClient(BasePolymarketClient):
             return levels
         for item in raw_levels[:15]:
             if isinstance(item, dict):
-                price = float(item.get("price") or item.get("p") or 0)
-                size = float(item.get("size") or item.get("quantity") or item.get("q") or 0)
+                px = item.get("price") or item.get("p") or item.get("px") or 0
+                if isinstance(px, dict):
+                    px = px.get("value") or px.get("amount") or 0
+                qty = item.get("size") or item.get("quantity") or item.get("q") or item.get("qty") or 0
+                if isinstance(qty, dict):
+                    qty = qty.get("value") or qty.get("amount") or 0
+                price = float(px or 0)
+                size = float(qty or 0)
             elif isinstance(item, list) and len(item) >= 2:
                 price = float(item[0])
                 size = float(item[1])
@@ -416,12 +422,16 @@ class PolymarketClient(BasePolymarketClient):
         else:
             payload = await self._request(
                 "GET",
-                "/v1/markets/book",
-                params={"market_slug": slug},
+                f"/v1/markets/{slug}/book",
                 use_private=False,
             )
-        if isinstance(payload, dict) and "book" in payload and isinstance(payload["book"], dict):
-            payload = payload["book"]
+        if isinstance(payload, dict):
+            if "book" in payload and isinstance(payload["book"], dict):
+                payload = payload["book"]
+            elif "marketData" in payload and isinstance(payload["marketData"], dict):
+                payload = payload["marketData"]
+            elif "market_data" in payload and isinstance(payload["market_data"], dict):
+                payload = payload["market_data"]
         payload = payload if isinstance(payload, dict) else {}
 
         # Try explicit YES/NO sides first.
@@ -439,7 +449,7 @@ class PolymarketClient(BasePolymarketClient):
         # If API returns only one side (best bid/ask), synthesize complements.
         if not yes_book.bids.levels and not yes_book.asks.levels:
             bids = self._parse_price_levels(payload.get("bids"))
-            asks = self._parse_price_levels(payload.get("asks"))
+            asks = self._parse_price_levels(payload.get("asks") or payload.get("offers"))
             yes_book = TokenOrderBook(TokenType.YES, OrderBookSide(bids), OrderBookSide(asks))
             no_book = TokenOrderBook(
                 TokenType.NO,
@@ -508,9 +518,9 @@ class PolymarketClient(BasePolymarketClient):
                     request_id = f"markets-{uuid.uuid4().hex[:10]}"
                     subscribe_msg = {
                         "subscribe": {
-                            "request_id": request_id,
-                            "subscription_type": 2,
-                            "market_slugs": market_slugs,
+                            "requestId": request_id,
+                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
+                            "marketSlugs": market_slugs,
                         }
                     }
                     await ws.send(json.dumps(subscribe_msg))
@@ -522,20 +532,32 @@ class PolymarketClient(BasePolymarketClient):
                         if payload.get("heartbeat") is not None:
                             continue
                         data = (
-                            payload.get("market_data_lite")
+                            payload.get("marketData")
+                            or payload.get("marketDataLite")
+                            or payload.get("market_data_lite")
                             or payload.get("market_data")
                             or payload.get("market_subscription_snapshot")
                         )
                         if not isinstance(data, dict):
                             continue
-                        market_slug = str(data.get("market_slug") or data.get("slug") or "")
+                        market_slug = str(data.get("marketSlug") or data.get("market_slug") or data.get("slug") or "")
                         if not market_slug:
                             continue
                         market_id = slug_to_market_id.get(market_slug, market_slug)
+
+                        bids = self._parse_price_levels(data.get("bids"))
+                        asks = self._parse_price_levels(data.get("asks") or data.get("offers"))
+                        best_bid = data.get("bestBid")
+                        best_ask = data.get("bestAsk")
+                        if not bids and isinstance(best_bid, dict):
+                            bids = self._parse_price_levels([{"px": best_bid, "qty": data.get("bidDepth") or 1}])
+                        if not asks and isinstance(best_ask, dict):
+                            asks = self._parse_price_levels([{"px": best_ask, "qty": data.get("askDepth") or 1}])
+
                         yes_book = TokenOrderBook(
                             token_type=TokenType.YES,
-                            bids=OrderBookSide(levels=self._parse_price_levels(data.get("yes_bids") or data.get("bids"))),
-                            asks=OrderBookSide(levels=self._parse_price_levels(data.get("yes_asks") or data.get("asks"))),
+                            bids=OrderBookSide(levels=self._parse_price_levels(data.get("yes_bids")) or bids),
+                            asks=OrderBookSide(levels=self._parse_price_levels(data.get("yes_asks")) or asks),
                         )
                         no_book = TokenOrderBook(
                             token_type=TokenType.NO,

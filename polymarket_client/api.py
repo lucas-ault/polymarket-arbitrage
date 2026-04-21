@@ -640,17 +640,26 @@ class PolymarketClient(BasePolymarketClient):
 
         if self.use_websocket and self.key_id and self.secret_key:
             ws_failed = False
+            ws_emitted = False
             try:
                 async for item in self._stream_orderbooks_ws(
                     resolved_slugs,
                     slug_to_market_id,
                     rotation_delay,
                 ):
+                    ws_emitted = True
                     yield item
             except Exception:
                 ws_failed = True
-            if not ws_failed:
+            # If websocket loop ended without exceptions and without emitting,
+            # treat it as a soft failure and fall back to REST polling.
+            if not ws_failed and ws_emitted:
                 return
+            logger.warning(
+                "Websocket stream unavailable (failed=%s emitted=%s); switching to REST polling",
+                ws_failed,
+                ws_emitted,
+            )
 
         async for item in self._stream_orderbooks_polling(
             resolved_slugs,

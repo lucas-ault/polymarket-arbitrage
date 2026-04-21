@@ -32,6 +32,7 @@ class DashboardIntegration:
         risk_manager=None,
         portfolio=None,
         profit_telemetry=None,
+        auto_take_profit_monitor=None,
         mode: str = "dry_run",
         ws_market_limit: Optional[int] = None,
     ):
@@ -41,6 +42,7 @@ class DashboardIntegration:
         self.risk_manager = risk_manager
         self.portfolio = portfolio
         self.profit_telemetry = profit_telemetry
+        self.auto_take_profit_monitor = auto_take_profit_monitor
         
         dashboard_state.mode = mode
         dashboard_state.is_running = False
@@ -111,6 +113,20 @@ class DashboardIntegration:
                         "unrealized_pnl": unrealized,
                     }
                 )
+                if self.auto_take_profit_monitor:
+                    status = self.auto_take_profit_monitor.get_position_status(market_id, token_type)
+                    if status:
+                        rows[-1].update(
+                            {
+                                "take_profit_net_profit_est": float(status.get("net_profit_est", 0.0) or 0.0),
+                                "take_profit_threshold_usd": float(status.get("threshold_usd", 0.0) or 0.0),
+                                "take_profit_distance_usd": float(status.get("distance_usd", 0.0) or 0.0),
+                                "take_profit_progress_pct": float(status.get("progress_pct", 0.0) or 0.0),
+                                "take_profit_exit_price": float(status.get("exit_price", 0.0) or 0.0),
+                                "close_to_take_profit": bool(status.get("close_to_take_profit")),
+                                "has_open_take_profit_order": bool(status.get("has_open_take_profit_order")),
+                            }
+                        )
 
         rows.sort(key=lambda row: abs(float(row.get("notional", 0.0) or 0.0)), reverse=True)
         return rows

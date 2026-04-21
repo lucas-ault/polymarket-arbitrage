@@ -86,6 +86,9 @@ class TradingConfig:
     taker_fee_bps: float = 500.0
     fee_theta_taker: float = 0.05
     fee_theta_maker: float = -0.0125
+    auto_take_profit_enabled: bool = False
+    auto_take_profit_profit_threshold_usd: float = 0.20
+    auto_take_profit_cooldown_seconds: float = 15.0
 
 
 @dataclass
@@ -363,6 +366,10 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("trading.mm_invalidation_grace_seconds must be non-negative")
     if config.trading.mm_invalidation_min_updates < 1:
         errors.append("trading.mm_invalidation_min_updates must be at least 1")
+    if config.trading.auto_take_profit_profit_threshold_usd < 0:
+        errors.append("trading.auto_take_profit_profit_threshold_usd must be non-negative")
+    if config.trading.auto_take_profit_cooldown_seconds < 0:
+        errors.append("trading.auto_take_profit_cooldown_seconds must be non-negative")
     
     # Risk validation
     if config.risk.max_position_per_market <= 0:

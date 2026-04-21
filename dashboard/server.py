@@ -1896,10 +1896,40 @@ def get_embedded_html() -> str:
                 const entry = Number(pos.avg_entry_price || 0);
                 const current = pos.current_price;
                 const unrealized = pos.unrealized_pnl;
+                const takeProfitNet = pos.take_profit_net_profit_est;
+                const takeProfitThreshold = Number(pos.take_profit_threshold_usd || 0);
+                const takeProfitDistance = pos.take_profit_distance_usd;
+                const takeProfitProgress = Number(pos.take_profit_progress_pct || 0);
+                const takeProfitExit = pos.take_profit_exit_price;
+                const closeToTakeProfit = Boolean(pos.close_to_take_profit);
+                const hasOpenTakeProfitOrder = Boolean(pos.has_open_take_profit_order);
                 const unrealizedText = (unrealized === null || unrealized === undefined)
                     ? '--'
                     : formatCurrency(Number(unrealized));
                 const unrealizedColor = (unrealized || 0) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+                let takeProfitHtml = '';
+                if (takeProfitNet !== null && takeProfitNet !== undefined && takeProfitThreshold > 0) {
+                    const dist = Number(takeProfitDistance || 0);
+                    const net = Number(takeProfitNet || 0);
+                    const color = net >= takeProfitThreshold
+                        ? 'var(--accent-green)'
+                        : closeToTakeProfit
+                            ? '#f7b955'
+                            : 'var(--text-secondary)';
+                    const statusLabel = hasOpenTakeProfitOrder
+                        ? 'take-profit order resting'
+                        : closeToTakeProfit
+                            ? 'close to take-profit'
+                            : 'take-profit monitor';
+                    takeProfitHtml = `
+                        <div style="font-size: 0.72rem; color: ${color}; margin-top: 0.25rem;">
+                            ${statusLabel} · net ${formatCurrency(net)} / ${formatCurrency(takeProfitThreshold)}
+                            ${takeProfitExit ? ` · exit ${Number(takeProfitExit).toFixed(4)}` : ''}
+                            ${net < takeProfitThreshold ? ` · needs ${formatCurrency(Math.max(0, dist))}` : ''}
+                            · ${Math.max(0, Math.min(100, takeProfitProgress)).toFixed(0)}%
+                        </div>
+                    `;
+                }
 
                 return `
                     <div class="position-item">
@@ -1909,6 +1939,7 @@ def get_embedded_html() -> str:
                                 ${token} · ${size.toFixed(2)} @ ${entry.toFixed(4)}
                                 ${current !== null && current !== undefined ? ` · mark ${Number(current).toFixed(4)}` : ''}
                             </div>
+                            ${takeProfitHtml}
                         </div>
                         <div style="text-align: right; color: var(--text-primary);">${formatCurrency(Number(pos.notional || 0))}</div>
                         <div style="text-align: right; color: ${unrealizedColor};">${unrealizedText}</div>

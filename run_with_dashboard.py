@@ -28,6 +28,7 @@ from polymarket_client import PolymarketClient
 from kalshi_client import KalshiClient
 from core.data_feed import DataFeed
 from core.arb_engine import ArbEngine, ArbConfig
+from core.auto_take_profit import AutoTakeProfitConfig, AutoTakeProfitMonitor
 from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
@@ -85,6 +86,7 @@ class TradingBotWithDashboard:
         self._stopping = False
         self._seen_trade_ids: set[str] = set()
         self._live_fill_bootstrapped = False
+        self.auto_take_profit_monitor: AutoTakeProfitMonitor | None = None
     
     async def start(self) -> None:
         """Start the bot and dashboard."""
@@ -118,6 +120,20 @@ class TradingBotWithDashboard:
         self.arb_engine = components.arb_engine
         self.data_feed = components.data_feed
         self.profit_telemetry = ProfitTelemetry()
+        self.auto_take_profit_monitor = AutoTakeProfitMonitor(
+            AutoTakeProfitConfig(
+                enabled=bool(self.config.trading.auto_take_profit_enabled),
+                min_net_profit_usd=float(
+                    self.config.trading.auto_take_profit_profit_threshold_usd
+                ),
+                cooldown_seconds=float(
+                    self.config.trading.auto_take_profit_cooldown_seconds
+                ),
+            ),
+            self.execution_engine,
+            self.portfolio,
+            fee_theta_taker=float(self.config.trading.fee_theta_taker),
+        )
         
         # Initialize Kalshi client (if cross-platform enabled)
         if self.config.mode.cross_platform_enabled and self.config.mode.kalshi_enabled:
@@ -152,6 +168,7 @@ class TradingBotWithDashboard:
             risk_manager=self.risk_manager,
             portfolio=self.portfolio,
             profit_telemetry=self.profit_telemetry,
+            auto_take_profit_monitor=self.auto_take_profit_monitor,
             mode="dry_run" if self.config.is_dry_run else "live",
             ws_market_limit=(
                 None
@@ -228,6 +245,8 @@ class TradingBotWithDashboard:
             return
 
         self._mark_portfolio_to_market(market_id, market_state)
+        if self.auto_take_profit_monitor:
+            self.auto_take_profit_monitor.maybe_submit_for_market(market_id, market_state)
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():
@@ -375,6 +394,11 @@ class TradingBotWithDashboard:
                 signal_count = int(getattr(arb_stats, "signals_generated", 0) or 0)
                 orders_placed = int(getattr(exec_stats, "orders_placed", 0) or 0)
                 orders_filled = int(getattr(exec_stats, "orders_filled", 0) or 0)
+                orders_cancelled = int(getattr(exec_stats, "orders_cancelled", 0) or 0)
+                orders_rejected = int(getattr(exec_stats, "orders_rejected", 0) or 0)
+                signals_rejected = int(getattr(exec_stats, "signals_rejected", 0) or 0)
+                open_orders = int(self.execution_engine.open_order_count) if self.execution_engine else 0
+                queue_depth = int(self.execution_engine.signal_queue_size) if self.execution_engine else 0
 
                 new_signals = signal_count - last_signal_count
                 new_orders = orders_placed - last_order_count
@@ -391,19 +415,40 @@ class TradingBotWithDashboard:
                     risk_summary = self.risk_manager.get_summary()
                     kill_switch = bool(risk_summary.get("kill_switch_triggered", False))
 
+                take_profit_suffix = ""
+                if self.auto_take_profit_monitor:
+                    close_candidates = self.auto_take_profit_monitor.get_close_candidates(limit=2)
+                    if close_candidates:
+                        candidate_bits = [
+                            (
+                                f"{item.get('market_id')}/{item.get('token_type')} "
+                                f"net=${float(item.get('net_profit_est', 0.0)):.2f} "
+                                f"dist=${float(item.get('distance_usd', 0.0)):.2f}"
+                            )
+                            for item in close_candidates
+                        ]
+                        take_profit_suffix = " | tp_near=" + "; ".join(candidate_bits)
+
                 logger.info(
                     "heartbeat | markets=%d | signals(total/new60s)=%d/%d | "
                     "orders_placed/filled=%d/%d (new placed in 60s=%d) | "
-                    "session PnL=$%.2f | exposure=$%.2f%s",
+                    "open/cxl/rej/sigrej=%d/%d/%d/%d | queue=%d | "
+                    "session PnL=$%.2f | exposure=$%.2f%s%s",
                     markets_tracked,
                     signal_count,
                     new_signals,
                     orders_placed,
                     orders_filled,
                     new_orders,
+                    open_orders,
+                    orders_cancelled,
+                    orders_rejected,
+                    signals_rejected,
+                    queue_depth,
                     float(pnl.get("total_pnl", 0.0)),
                     float(exposure),
                     " | KILL SWITCH ACTIVE" if kill_switch else "",
+                    take_profit_suffix,
                 )
 
                 # Bundle-arb visibility: when signals=0, show the operator

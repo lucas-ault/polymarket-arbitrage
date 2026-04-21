@@ -24,6 +24,7 @@ from typing import Optional
 from polymarket_client import PolymarketClient
 from core.data_feed import DataFeed
 from core.arb_engine import ArbEngine, ArbConfig
+from core.auto_take_profit import AutoTakeProfitConfig, AutoTakeProfitMonitor
 from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
@@ -65,6 +66,7 @@ class TradingBot:
         self.profit_telemetry: Optional[ProfitTelemetry] = None
         self._seen_trade_ids: set[str] = set()
         self._live_fill_bootstrapped: bool = False
+        self.auto_take_profit_monitor: Optional[AutoTakeProfitMonitor] = None
     
     async def start(self) -> None:
         """Initialize and start all components."""
@@ -91,6 +93,20 @@ class TradingBot:
         self.arb_engine = components.arb_engine
         self.data_feed = components.data_feed
         self.profit_telemetry = ProfitTelemetry()
+        self.auto_take_profit_monitor = AutoTakeProfitMonitor(
+            AutoTakeProfitConfig(
+                enabled=bool(self.config.trading.auto_take_profit_enabled),
+                min_net_profit_usd=float(
+                    self.config.trading.auto_take_profit_profit_threshold_usd
+                ),
+                cooldown_seconds=float(
+                    self.config.trading.auto_take_profit_cooldown_seconds
+                ),
+            ),
+            self.execution_engine,
+            self.portfolio,
+            fee_theta_taker=float(self.config.trading.fee_theta_taker),
+        )
         
         await self.data_feed.start()
         
@@ -123,6 +139,8 @@ class TradingBot:
         # Mark portfolio to latest mid before evaluating risk so unrealized PnL
         # tracks the live book even in headless mode.
         self._mark_portfolio_to_market(market_id, market_state)
+        if self.auto_take_profit_monitor:
+            self.auto_take_profit_monitor.maybe_submit_for_market(market_id, market_state)
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():

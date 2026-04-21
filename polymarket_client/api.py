@@ -459,6 +459,10 @@ class PolymarketClient(BasePolymarketClient):
         payload = self._coerce_to_dict(payload)
         market = self._parse_market(payload)
         if not market:
+            logger.warning(
+                "Market lookup returned no metadata for target=%s; using synthetic market fallback",
+                market_id,
+            )
             market = Market(
                 market_id=market_id,
                 market_slug=market_id,
@@ -1382,7 +1386,15 @@ class PolymarketClient(BasePolymarketClient):
             order.order_id = str(returned_id)
             return order
         except Exception as exc:
-            logger.error("Failed to place order: %s", exc)
+            logger.error(
+                "Failed to place order: %s | market_id=%s | market_slug=%s | intent=%s | price=%.4f | size=%d",
+                exc,
+                market.market_id,
+                market.market_slug or market.market_id,
+                intent,
+                api_price,
+                rounded_quantity,
+            )
             order.status = OrderStatus.REJECTED
             raise
 

@@ -77,6 +77,8 @@ class ModeConfig:
     kalshi_enabled: bool = True  # Enable Kalshi market monitoring
     min_match_similarity: float = 0.6  # Minimum similarity score for market matching (0-1)
     cross_platform_match_start_delay_seconds: float = 0.0
+    cross_platform_match_process_workers: int = 0  # 0 = auto
+    cross_platform_candidate_limit: int = 300
     dry_run_initial_balance: float = 10000.0
     simulate_fills: bool = True
     fill_probability: float = 0.8
@@ -302,6 +304,10 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("mode.min_match_similarity must be between 0 and 1")
     if config.mode.cross_platform_match_start_delay_seconds < 0:
         errors.append("mode.cross_platform_match_start_delay_seconds must be non-negative")
+    if config.mode.cross_platform_match_process_workers < 0:
+        errors.append("mode.cross_platform_match_process_workers must be non-negative")
+    if config.mode.cross_platform_candidate_limit <= 0:
+        errors.append("mode.cross_platform_candidate_limit must be positive")
     
     if config.monitoring.orderbook_active_batch_size <= 0:
         errors.append("monitoring.orderbook_active_batch_size must be positive")

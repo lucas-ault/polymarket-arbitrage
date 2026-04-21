@@ -47,6 +47,8 @@ mode:
   kalshi_enabled: true
   min_match_similarity: 0.65
   cross_platform_match_start_delay_seconds: 5.0
+  cross_platform_match_process_workers: 3
+  cross_platform_candidate_limit: 220
   dry_run_initial_balance: 10000
   simulate_fills: true
   fill_probability: 0.8
@@ -66,15 +68,15 @@ monitoring:
   heartbeat_interval: 30
   track_latency: true
   track_fill_rates: true
-  orderbook_active_batch_size: 500
+  orderbook_active_batch_size: 450
   orderbook_request_batch_size: 20
-  orderbook_fetch_concurrency: 12
+  orderbook_fetch_concurrency: 16
   orderbook_request_delay_seconds: 0.0
-  orderbook_batch_delay_seconds: 0.15
-  orderbook_rotation_delay_seconds: 1.25
+  orderbook_batch_delay_seconds: 0.12
+  orderbook_rotation_delay_seconds: 1.0
 
 cache:
-  enabled: false
+  enabled: true
   backend: "redis"
   redis_url: "redis://localhost:6379/0"
   key_prefix: "pmarb"

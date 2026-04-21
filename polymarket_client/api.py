@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 MARKETS_CACHE_KEY = "pm:active_markets:v1"
 MARKETS_CACHE_SCHEMA_VERSION = 1
+INVALID_TOKEN_TTL_SECONDS = 1800
 
 
 class BasePolymarketClient(ABC):
@@ -168,8 +169,12 @@ class PolymarketClient(BasePolymarketClient):
             "cache_markets_hit": 0.0,
             "cache_markets_miss": 0.0,
             "cache_markets_writes": 0.0,
+            "orderbook_invalid_token_skips": 0.0,
+            "orderbook_invalid_token_marks": 0.0,
         }
         self._markets_refresh_task: Optional[asyncio.Task] = None
+        self._invalid_token_ids: dict[str, float] = {}
+        self._priority_market_ids: list[str] = []
         
     async def __aenter__(self) -> "PolymarketClient":
         await self.connect()
@@ -214,6 +219,9 @@ class PolymarketClient(BasePolymarketClient):
             self._runtime_stats["cache_markets_miss"] += 1
             return False
         markets = payload.get("markets", [])
+        self._priority_market_ids = [
+            str(market_id) for market_id in payload.get("top_market_ids", []) if market_id
+        ]
         loaded = 0
         for item in markets:
             market = self._parse_market(item)
@@ -233,6 +241,7 @@ class PolymarketClient(BasePolymarketClient):
             "schema_version": MARKETS_CACHE_SCHEMA_VERSION,
             "cached_at": datetime.utcnow().isoformat(),
             "market_count": len(raw_markets),
+            "top_market_ids": self._priority_market_ids[:1500],
             "markets": raw_markets,
         }
         stored = await self.cache_store.set_json(
@@ -303,6 +312,11 @@ class PolymarketClient(BasePolymarketClient):
                 break
 
         return all_markets, all_raw_markets, discovery_batches
+
+    def _refresh_priority_market_ids(self, markets: list[Market]) -> None:
+        """Track highest-liquidity market IDs for faster startup rotation."""
+        ranked = sorted(markets, key=lambda market: market.volume_24h, reverse=True)
+        self._priority_market_ids = [market.market_id for market in ranked if market.market_id][:1500]
 
     def _schedule_markets_refresh(self, params: dict[str, Any]) -> None:
         """Refresh cached market list asynchronously without blocking startup."""
@@ -415,6 +429,7 @@ class PolymarketClient(BasePolymarketClient):
             
             logger.info("Fetching ALL available markets from Polymarket...")
             all_markets, all_raw_markets, discovery_batches = await self._fetch_markets_from_api(params)
+            self._refresh_priority_market_ids(all_markets)
             
             self._runtime_stats["market_discovery_batches"] = float(discovery_batches)
             self._runtime_stats["markets_discovered_valid"] = float(len(all_markets))
@@ -637,6 +652,14 @@ class PolymarketClient(BasePolymarketClient):
     
     async def _fetch_token_orderbook(self, token_id: str, token_type: TokenType) -> TokenOrderBook:
         """Fetch order book for a single token from CLOB API."""
+        invalid_until = self._invalid_token_ids.get(token_id)
+        if invalid_until and invalid_until > time.time():
+            self._runtime_stats["orderbook_invalid_token_skips"] += 1
+            return TokenOrderBook(
+                token_type=token_type,
+                bids=OrderBookSide(levels=[]),
+                asks=OrderBookSide(levels=[]),
+            )
         try:
             data = await self._request(
                 "GET",
@@ -666,7 +689,17 @@ class PolymarketClient(BasePolymarketClient):
                 bids=OrderBookSide(levels=bids),
                 asks=OrderBookSide(levels=asks),
             )
-            
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                self._invalid_token_ids[token_id] = time.time() + INVALID_TOKEN_TTL_SECONDS
+                self._runtime_stats["orderbook_invalid_token_marks"] += 1
+                logger.debug("Caching invalid token %s after 404", token_id)
+            logger.warning(f"Failed to fetch orderbook for token {token_id}: {exc}")
+            return TokenOrderBook(
+                token_type=token_type,
+                bids=OrderBookSide(levels=[]),
+                asks=OrderBookSide(levels=[]),
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch orderbook for token {token_id}: {e}")
             # Return empty book
@@ -798,7 +831,13 @@ class PolymarketClient(BasePolymarketClient):
         self._runtime_stats["markets_per_request_batch"] = float(markets_per_request_batch)
         self._runtime_stats["request_concurrency"] = float(request_concurrency)
         
-        market_list = list(market_tokens.keys())
+        if self._priority_market_ids:
+            prioritized = [market_id for market_id in self._priority_market_ids if market_id in market_tokens]
+            prioritized_set = set(prioritized)
+            remaining = [market_id for market_id in market_tokens.keys() if market_id not in prioritized_set]
+            market_list = prioritized + remaining
+        else:
+            market_list = list(market_tokens.keys())
         total_markets = len(market_list)
         current_offset = 0
         

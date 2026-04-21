@@ -18,7 +18,6 @@ import logging
 import socket
 import signal
 import sys
-import threading
 import time
 from datetime import datetime
 
@@ -31,7 +30,7 @@ from core.arb_engine import ArbEngine, ArbConfig
 from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
-from core.cross_platform_arb import CrossPlatformArbEngine, MarketMatcher
+from core.cross_platform_arb import CrossPlatformArbEngine
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging
 from utils.redis_cache import RedisCacheConfig, create_cache_store
@@ -372,62 +371,48 @@ class TradingBotWithDashboard:
                 self._matching_task = asyncio.create_task(self._run_matching_background(polymarket_markets))
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
-        """Run market matching in a thread pool so dashboard stays fully responsive."""
-        import concurrent.futures
-        
+        """Run market matching with process-parallel scoring and async progress updates."""
         try:
             dashboard_state.cross_platform["matching_status"] = "matching"
             total = len(polymarket_markets) * len(self._kalshi_markets)
             dashboard_state.cross_platform["matching_total"] = total
             matching_started_at = time.perf_counter()
             
-            # Run matching in thread pool to avoid blocking event loop
             loop = asyncio.get_event_loop()
             progress_queue: asyncio.Queue[dict] = asyncio.Queue()
             
             def run_matching_sync():
-                """Synchronous matching that runs in thread."""
-                import asyncio
-                # Create new event loop for this thread
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                
+                def on_progress(checked, total_comparisons, matches_found):
+                    loop.call_soon_threadsafe(
+                        progress_queue.put_nowait,
+                        {
+                            "checked": checked,
+                            "total": total_comparisons,
+                            "matches_found": matches_found,
+                        },
+                    )
+                return self.market_matcher.find_matches_parallel(
+                    polymarket_markets=polymarket_markets,
+                    kalshi_markets=self._kalshi_markets,
+                    on_progress=on_progress,
+                    process_workers=self.config.mode.cross_platform_match_process_workers,
+                    candidate_limit=self.config.mode.cross_platform_candidate_limit,
+                )
+            
+            matching_future = asyncio.create_task(asyncio.to_thread(run_matching_sync))
+            while not matching_future.done():
                 try:
-                    def on_progress(checked, total, matches_found):
-                        loop.call_soon_threadsafe(
-                            progress_queue.put_nowait,
-                            {
-                                "checked": checked,
-                                "total": total,
-                                "matches_found": matches_found,
-                            },
-                        )
-                    
-                    result = new_loop.run_until_complete(
-                        self.market_matcher.find_matches(
-                            polymarket_markets,
-                            self._kalshi_markets,
-                            on_progress=on_progress,
-                        )
-                    )
-                    return result
-                finally:
-                    new_loop.close()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                matching_future = loop.run_in_executor(executor, run_matching_sync)
-                while not matching_future.done():
-                    try:
-                        progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
-                    except asyncio.TimeoutError:
-                        continue
-                    dashboard_state.cross_platform["matching_checked"] = progress["checked"]
-                    total_comparisons = progress["total"]
-                    dashboard_state.cross_platform["matching_progress"] = (
-                        int(progress["checked"] / total_comparisons * 100)
-                        if total_comparisons > 0 else 0
-                    )
-                    dashboard_state.cross_platform["matched_pairs"] = progress["matches_found"]
-                self._matched_pairs = await matching_future
+                    progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                dashboard_state.cross_platform["matching_checked"] = progress["checked"]
+                total_comparisons = progress["total"]
+                dashboard_state.cross_platform["matching_progress"] = (
+                    int(progress["checked"] / total_comparisons * 100)
+                    if total_comparisons > 0 else 0
+                )
+                dashboard_state.cross_platform["matched_pairs"] = progress["matches_found"]
+            self._matched_pairs = await matching_future
             
             dashboard_state.cross_platform["matching_status"] = "complete"
             dashboard_state.cross_platform["matching_progress"] = 100

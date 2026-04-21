@@ -10,7 +10,9 @@ When the same prediction is priced differently on both platforms, we can:
 """
 
 import asyncio
+import concurrent.futures
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -20,6 +22,76 @@ from typing import Optional
 from polymarket_client.models import Market, OrderBook, Opportunity, OpportunityType
 
 logger = logging.getLogger(__name__)
+
+
+def _tokenize_for_index(text: str) -> set[str]:
+    """Fast tokenization for shortlist indexing."""
+    normalized = re.sub(r"[^\w\s]", " ", text.lower())
+    return {token for token in normalized.split() if len(token) >= 3}
+
+
+def _match_category_worker(
+    category: str,
+    poly_payloads: list[dict],
+    kalshi_payloads: list[dict],
+    min_similarity: float,
+    candidate_limit: int,
+) -> dict:
+    """
+    Process-pool worker for one category.
+    
+    Returns serialized matches and checked comparison count.
+    """
+    matcher = MarketMatcher(min_similarity=min_similarity)
+    kalshi_index = []
+    for item in kalshi_payloads:
+        kalshi_index.append(
+            {
+                "ticker": item["ticker"],
+                "title": item["title"],
+                "tokens": _tokenize_for_index(item["title"]),
+            }
+        )
+    
+    serialized_matches: list[dict] = []
+    checked = 0
+    
+    for poly_item in poly_payloads:
+        poly_tokens = _tokenize_for_index(poly_item["question"])
+        ranked = sorted(
+            kalshi_index,
+            key=lambda candidate: len(poly_tokens & candidate["tokens"]),
+            reverse=True,
+        )
+        shortlist = ranked[: max(1, candidate_limit)]
+        best_score = 0.0
+        best_match = None
+        
+        for kalshi_item in shortlist:
+            checked += 1
+            score = matcher.calculate_similarity(poly_item["question"], kalshi_item["title"])
+            if score > best_score:
+                best_score = score
+                best_match = kalshi_item
+        
+        if best_match and best_score >= min_similarity:
+            serialized_matches.append(
+                {
+                    "polymarket_id": poly_item["market_id"],
+                    "kalshi_ticker": best_match["ticker"],
+                    "polymarket_question": poly_item["question"],
+                    "kalshi_title": best_match["title"],
+                    "similarity_score": best_score,
+                    "category": category,
+                }
+            )
+    
+    return {
+        "category": category,
+        "checked": checked,
+        "matches": serialized_matches,
+        "total_comparisons": len(poly_payloads) * max(1, min(len(kalshi_payloads), candidate_limit)),
+    }
 
 
 @dataclass
@@ -450,12 +522,30 @@ class MarketMatcher:
             return 'tech'
         
         return 'other'
+
+    def _build_kalshi_shortlist(
+        self,
+        poly_question: str,
+        kalshi_markets_cat: list,
+        candidate_limit: int,
+    ) -> list:
+        """Select top Kalshi candidates before expensive similarity scoring."""
+        if len(kalshi_markets_cat) <= candidate_limit:
+            return kalshi_markets_cat
+        poly_tokens = _tokenize_for_index(poly_question)
+        ranked = sorted(
+            kalshi_markets_cat,
+            key=lambda market: len(poly_tokens & _tokenize_for_index(getattr(market, "title", ""))),
+            reverse=True,
+        )
+        return ranked[:candidate_limit]
     
     async def find_matches(
         self,
         polymarket_markets: list[Market],
         kalshi_markets: list,  # list[KalshiMarket]
         on_progress: callable = None,  # Callback for progress updates
+        candidate_limit: int = 300,
     ) -> list[MarketPair]:
         """
         Find matching markets between platforms using category-based matching.
@@ -527,7 +617,12 @@ class MarketMatcher:
                 best_match = None
                 best_score = 0.0
                 
-                for kalshi_market in kalshi_markets_cat:
+                shortlist = self._build_kalshi_shortlist(
+                    poly_market.question,
+                    kalshi_markets_cat,
+                    max(1, candidate_limit),
+                )
+                for kalshi_market in shortlist:
                     score = self.calculate_similarity(
                         poly_market.question,
                         kalshi_market.title
@@ -572,6 +667,120 @@ class MarketMatcher:
                     )
         
         logger.info(f"=== MATCHING COMPLETE: {len(matches)} pairs found ===")
+        return matches
+
+    def find_matches_parallel(
+        self,
+        polymarket_markets: list[Market],
+        kalshi_markets: list,
+        on_progress: callable = None,
+        process_workers: int = 0,
+        candidate_limit: int = 300,
+    ) -> list[MarketPair]:
+        """Find matches with category-sharded process parallelism."""
+        active_poly = [market for market in polymarket_markets if market.active]
+        active_kalshi = [market for market in kalshi_markets if market.is_active]
+        
+        poly_by_cat: dict[str, list] = {}
+        for market in active_poly:
+            category = self._categorize_market(market.question)
+            poly_by_cat.setdefault(category, []).append(market)
+        
+        kalshi_by_cat: dict[str, list] = {}
+        for market in active_kalshi:
+            category = self._categorize_market(market.title)
+            kalshi_by_cat.setdefault(category, []).append(market)
+        
+        priority_categories = ["sports", "politics", "crypto", "finance", "entertainment", "tech"]
+        jobs = []
+        for category in priority_categories:
+            poly_cat = poly_by_cat.get(category, [])
+            kalshi_cat = kalshi_by_cat.get(category, [])
+            if not poly_cat or not kalshi_cat:
+                continue
+            jobs.append(
+                (
+                    category,
+                    [
+                        {"market_id": market.market_id, "question": market.question}
+                        for market in poly_cat
+                    ],
+                    [
+                        {"ticker": market.ticker, "title": market.title}
+                        for market in kalshi_cat
+                    ],
+                )
+            )
+        
+        if not jobs:
+            return []
+        
+        total = sum(len(poly) * len(kalshi) for _, poly, kalshi in jobs)
+        workers = process_workers if process_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
+        workers = min(workers, len(jobs))
+        logger.info(
+            "Parallel matching with %s worker(s), shortlist=%s, total comparisons=%s",
+            workers,
+            candidate_limit,
+            total,
+        )
+        
+        serialized_matches: list[dict] = []
+        checked = 0
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                future_map = {
+                    executor.submit(
+                        _match_category_worker,
+                        category,
+                        poly_payloads,
+                        kalshi_payloads,
+                        self.min_similarity,
+                        max(1, candidate_limit),
+                    ): category
+                    for category, poly_payloads, kalshi_payloads in jobs
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    result = future.result()
+                    checked += int(result.get("checked", 0))
+                    serialized_matches.extend(result.get("matches", []))
+                    if on_progress:
+                        try:
+                            on_progress(checked, total, len(serialized_matches))
+                        except Exception:
+                            pass
+        except (PermissionError, OSError, NotImplementedError) as exc:
+            logger.warning("Process matching unavailable, falling back to local worker mode: %s", exc)
+            for category, poly_payloads, kalshi_payloads in jobs:
+                result = _match_category_worker(
+                    category,
+                    poly_payloads,
+                    kalshi_payloads,
+                    self.min_similarity,
+                    max(1, candidate_limit),
+                )
+                checked += int(result.get("checked", 0))
+                serialized_matches.extend(result.get("matches", []))
+                if on_progress:
+                    try:
+                        on_progress(checked, total, len(serialized_matches))
+                    except Exception:
+                        pass
+        
+        matches: list[MarketPair] = []
+        for raw in serialized_matches:
+            pair = MarketPair(
+                polymarket_id=raw["polymarket_id"],
+                kalshi_ticker=raw["kalshi_ticker"],
+                polymarket_question=raw["polymarket_question"],
+                kalshi_title=raw["kalshi_title"],
+                similarity_score=float(raw["similarity_score"]),
+                category=raw.get("category", ""),
+            )
+            matches.append(pair)
+            self._matched_pairs[pair.pair_id] = pair
+        
+        logger.info("=== PARALLEL MATCHING COMPLETE: %s pairs found ===", len(matches))
         return matches
     
     def get_cached_pairs(self) -> list[MarketPair]:

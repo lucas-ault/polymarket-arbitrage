@@ -85,6 +85,8 @@ mode:
   kalshi_enabled: true            # Enable Kalshi market monitoring
   min_match_similarity: 0.6       # Minimum similarity score for market matching (0-1)
   cross_platform_match_start_delay_seconds: 5.0  # Delay matching startup to let feed warm up
+  cross_platform_match_process_workers: 0  # 0 = auto (CPU count - 1, minimum 1)
+  cross_platform_candidate_limit: 300  # shortlist before expensive similarity checks
   
   # Dry run settings
   dry_run_initial_balance: 50

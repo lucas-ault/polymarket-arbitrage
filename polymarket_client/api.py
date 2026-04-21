@@ -890,6 +890,15 @@ class PolymarketClient(BasePolymarketClient):
             )
         return messages
 
+    def _build_market_ws_shards(
+        self,
+        market_slugs: list[str],
+        *,
+        max_markets_per_connection: int = 100,
+    ) -> list[list[str]]:
+        """Shard market subscriptions into doc-compliant websocket groups."""
+        return self._chunked(market_slugs, max_markets_per_connection)
+
     def _build_private_ws_subscriptions(self) -> list[dict[str, Any]]:
         """Build private websocket subscriptions for order, position, and balance updates."""
         return [
@@ -1005,12 +1014,15 @@ class PolymarketClient(BasePolymarketClient):
 
         return None
 
-    async def _stream_orderbooks_ws(
+    async def _stream_orderbooks_ws_shard(
         self,
         market_slugs: list[str],
         slug_to_market_id: dict[str, str],
         rotation_delay: float,
-    ) -> AsyncIterator[tuple[str, OrderBook]]:
+        shard_index: int,
+        out_queue: asyncio.Queue[tuple[str, OrderBook]],
+    ) -> None:
+        reconnect_attempt = 0
         while True:
             try:
                 headers = self._auth_headers("GET", "/v1/ws/markets")
@@ -1020,10 +1032,11 @@ class PolymarketClient(BasePolymarketClient):
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
+                    reconnect_attempt = 0
                     for message in self._build_market_ws_subscriptions(market_slugs):
                         await ws.send(json.dumps(message))
                     while True:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=max(20.0, rotation_delay * 12))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=max(45.0, rotation_delay * 24))
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8", errors="ignore")
                         payload = json.loads(raw)
@@ -1038,25 +1051,71 @@ class PolymarketClient(BasePolymarketClient):
                         market_id, orderbook = parsed
                         orderbook.market_id = slug_to_market_id.get(market_id, market_id)
                         self._runtime_stats["orderbook_updates_emitted"] += 1
-                        yield orderbook.market_id, orderbook
+                        await out_queue.put((orderbook.market_id, orderbook))
             except asyncio.CancelledError:
                 raise
             except ConnectionClosed:
                 self._runtime_stats["ws_reconnects"] += 1
-                await asyncio.sleep(max(0.5, rotation_delay))
+                reconnect_attempt += 1
+                await asyncio.sleep(min(15.0, max(0.5, rotation_delay) * (2 ** min(reconnect_attempt, 4))))
             except asyncio.TimeoutError:
-                logger.warning("Markets websocket connected but received no data; falling back to REST polling")
+                logger.warning(
+                    "Markets websocket shard %d idle for %.0fs; reconnecting",
+                    shard_index,
+                    max(45.0, rotation_delay * 24),
+                )
                 self._runtime_stats["ws_reconnects"] += 1
-                if self.use_rest_fallback:
-                    break
-                await asyncio.sleep(max(0.5, rotation_delay))
+                reconnect_attempt += 1
+                await asyncio.sleep(min(15.0, max(0.5, rotation_delay) * (2 ** min(reconnect_attempt, 4))))
             except Exception as exc:
-                logger.warning("Markets websocket stream failure: %s", exc)
+                logger.warning("Markets websocket shard %d failure: %s", shard_index, exc)
                 self._runtime_stats["ws_reconnects"] += 1
-                if not self.use_rest_fallback:
-                    await asyncio.sleep(max(0.5, rotation_delay))
-                else:
-                    break
+                reconnect_attempt += 1
+                await asyncio.sleep(min(15.0, max(0.5, rotation_delay) * (2 ** min(reconnect_attempt, 4))))
+
+    async def _stream_orderbooks_ws(
+        self,
+        market_slugs: list[str],
+        slug_to_market_id: dict[str, str],
+        rotation_delay: float,
+    ) -> AsyncIterator[tuple[str, OrderBook]]:
+        shards = self._build_market_ws_shards(market_slugs)
+        if not shards:
+            return
+        logger.info("Starting %d markets websocket shard(s)", len(shards))
+        queue: asyncio.Queue[tuple[str, OrderBook]] = asyncio.Queue(maxsize=max(1000, len(shards) * 200))
+        tasks = [
+            asyncio.create_task(
+                self._stream_orderbooks_ws_shard(
+                    shard,
+                    slug_to_market_id,
+                    rotation_delay,
+                    index,
+                    queue,
+                ),
+                name=f"pm_markets_ws_shard_{index}",
+            )
+            for index, shard in enumerate(shards, start=1)
+        ]
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=max(90.0, rotation_delay * 48))
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "All markets websocket shards were idle for %.0fs; falling back to REST polling",
+                        max(90.0, rotation_delay * 48),
+                    )
+                    raise
+                yield item
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     async def _resolve_market_targets(self, targets: list[str]) -> tuple[list[str], dict[str, str]]:
         """Resolve requested targets to market slugs and slug->market_id mapping."""

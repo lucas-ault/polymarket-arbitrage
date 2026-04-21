@@ -264,6 +264,18 @@ def test_build_market_ws_subscriptions_uses_documented_camel_case_and_chunks():
     assert "marketSlugs" in first
 
 
+def test_build_market_ws_shards_limits_each_connection_to_100_markets():
+    client = PolymarketClient(dry_run=True)
+
+    market_slugs = [f"market-{idx}" for idx in range(205)]
+    shards = client._build_market_ws_shards(market_slugs)
+
+    assert len(shards) == 3
+    assert len(shards[0]) == 100
+    assert len(shards[1]) == 100
+    assert len(shards[2]) == 5
+
+
 def test_trade_from_private_execution_parses_fill():
     client = PolymarketClient(dry_run=True)
     client._markets_by_slug["event-slug"] = client._parse_market(

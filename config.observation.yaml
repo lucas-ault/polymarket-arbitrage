@@ -15,11 +15,11 @@ api:
 trading:
   # Empty list means full auto-discovery from polymarket.us.
   markets: []
-  min_edge: 0.04
+  min_edge: 0.015
   bundle_arb_enabled: true
-  min_spread: 0.07
+  min_spread: 0.03
   tick_size: 0.01
-  mm_enabled: false
+  mm_enabled: true
   default_order_size: 1
   min_order_size: 1
   max_order_size: 2

@@ -69,7 +69,7 @@ class DashboardState:
         """Convert state to dictionary for JSON serialization."""
         uptime = (datetime.utcnow() - self.started_at).total_seconds()
         if include_markets:
-            if market_limit is None:
+            if market_limit is None or market_limit <= 0:
                 serialized_markets = self.markets
             else:
                 serialized_markets = {
@@ -209,12 +209,12 @@ def create_app() -> FastAPI:
     @app.get("/api/state")
     async def get_state(
         include_markets: bool = Query(default=True),
-        market_limit: int = Query(default=300, ge=0),
+        market_limit: int = Query(default=0, ge=0),
     ):
         """Get current dashboard state."""
         return dashboard_state.to_dict(
             include_markets=include_markets,
-            market_limit=market_limit if include_markets else 0,
+            market_limit=(None if market_limit <= 0 else market_limit) if include_markets else 0,
         )
     
     @app.get("/api/markets")
@@ -286,7 +286,7 @@ def create_app() -> FastAPI:
             # Send initial state
             await websocket.send_text(json.dumps({
                 "type": "initial",
-                "data": dashboard_state.to_dict(include_markets=True, market_limit=300)
+                "data": dashboard_state.to_dict(include_markets=True, market_limit=None)
             }))
             
             # Keep connection alive and receive any commands
@@ -1768,6 +1768,9 @@ def get_embedded_html() -> str:
             
             // Activity
             updateActivity();
+
+            // Positions
+            updatePositions();
             
             // Risk
             updateRisk();
@@ -1872,6 +1875,43 @@ def get_embedded_html() -> str:
                             <div class="activity-message">${message}</div>
                             <div class="activity-time">${formatTime(act.timestamp)}</div>
                         </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function updatePositions() {
+            const list = document.getElementById('positionList');
+            const portfolio = state.portfolio || {};
+            const positions = portfolio.positions || [];
+
+            if (positions.length === 0) {
+                list.innerHTML = '<div class="empty-state"><div class="empty-icon">💼</div><div>No open positions</div></div>';
+                return;
+            }
+
+            list.innerHTML = positions.slice(0, 20).map(pos => {
+                const token = (pos.token_type || '').toUpperCase();
+                const size = Number(pos.size || 0);
+                const entry = Number(pos.avg_entry_price || 0);
+                const current = pos.current_price;
+                const unrealized = pos.unrealized_pnl;
+                const unrealizedText = (unrealized === null || unrealized === undefined)
+                    ? '--'
+                    : formatCurrency(Number(unrealized));
+                const unrealizedColor = (unrealized || 0) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+
+                return `
+                    <div class="position-item">
+                        <div>
+                            <div style="color: var(--text-primary); margin-bottom: 0.2rem;">${truncate(pos.question || pos.market_id, 48)}</div>
+                            <div style="font-size: 0.72rem; color: var(--text-secondary);">
+                                ${token} · ${size.toFixed(2)} @ ${entry.toFixed(4)}
+                                ${current !== null && current !== undefined ? ` · mark ${Number(current).toFixed(4)}` : ''}
+                            </div>
+                        </div>
+                        <div style="text-align: right; color: var(--text-primary);">${formatCurrency(Number(pos.notional || 0))}</div>
+                        <div style="text-align: right; color: ${unrealizedColor};">${unrealizedText}</div>
                     </div>
                 `;
             }).join('');
@@ -2424,31 +2464,6 @@ def get_embedded_html() -> str:
             const marketIds = Object.keys(markets);
             const cp = state.cross_platform || {};
             
-            // Show cross-platform matched pairs if available
-            const matchedPairs = cp.matched_pairs_data || [];
-            
-            // If we have matched pairs from cross-platform, show those
-            if (matchedPairs.length > 0) {
-                list.innerHTML = matchedPairs.slice(0, 10).map((pair, idx) => {
-                    const category = detectCategory(pair.poly_question || pair.kalshi_title || '');
-                    const similarity = ((pair.similarity || 0) * 100).toFixed(0);
-                    return `
-                        <div class="market-item">
-                            <div class="market-question">
-                                <span class="opp-badge" style="font-size: 0.6rem; margin-right: 0.5rem;">${category}</span>
-                                ${truncate(pair.poly_question || pair.kalshi_title || 'Market', 50)}
-                            </div>
-                            <div class="market-prices">
-                                <span style="color: #8b5cf6; font-size: 0.7rem;">P: ${pair.poly_yes ? formatPct(pair.poly_yes) : '--'}</span>
-                                <span style="color: #f7931a; font-size: 0.7rem;">K: ${pair.kalshi_yes ? formatPct(pair.kalshi_yes) : '--'}</span>
-                                <span style="color: var(--text-muted); font-size: 0.65rem;">${similarity}% match</span>
-                            </div>
-                        </div>
-                    `;
-                }).join('');
-                return;
-            }
-            
             // Show Polymarket markets if available
             if (marketIds.length === 0) {
                 const polyCount = cp.polymarket_markets || 0;
@@ -2470,7 +2485,7 @@ def get_embedded_html() -> str:
                 return;
             }
             
-            list.innerHTML = marketIds.slice(0, 10).map(id => {
+            list.innerHTML = marketIds.slice(0, 20).map(id => {
                 const m = markets[id];
                 const bid = m.best_bid_yes || 0;
                 const ask = m.best_ask_yes || 0;

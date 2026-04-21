@@ -200,3 +200,22 @@ async def test_discovery_prefers_mm_friendly_markets_when_trimming_to_200():
 
     assert all(f"balanced-{i}" in feed._markets for i in range(5))
     assert len(feed.market_ids) == 200
+
+
+@pytest.mark.asyncio
+async def test_discovery_respects_zero_max_monitored_markets_as_unlimited():
+    strict = [_market(f"strict-{i}", liquidity=500.0, volume_24h=1000.0) for i in range(60)]
+
+    client = _StubClient(strict=strict, loose=[])
+    feed = DataFeed(
+        client=client,
+        market_ids=[],
+        config=SimpleNamespace(
+            trading=SimpleNamespace(mm_enabled=False),
+            monitoring=SimpleNamespace(max_monitored_markets=0),
+        ),
+    )
+
+    await feed._fetch_markets()
+
+    assert len(feed.market_ids) == 60

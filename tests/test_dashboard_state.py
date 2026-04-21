@@ -28,6 +28,18 @@ def test_to_dict_respects_market_limit():
     assert payload["operational"]["dashboard_clients"] == 0
 
 
+def test_to_dict_zero_market_limit_returns_all_markets():
+    state = DashboardState()
+    state.markets = {
+        "m1": {"market_id": "m1"},
+        "m2": {"market_id": "m2"},
+        "m3": {"market_id": "m3"},
+    }
+
+    payload = state.to_dict(include_markets=True, market_limit=0)
+    assert len(payload["markets"]) == 3
+
+
 @pytest.mark.asyncio
 async def test_broadcast_updates_metrics():
     state = DashboardState()

@@ -248,13 +248,50 @@ class DataFeed:
 
         return score
 
+    async def _list_markets_all(
+        self,
+        filters: dict,
+        *,
+        force_refresh: bool = False,
+        page_limit: int = 300,
+    ) -> list[Market]:
+        """Fetch every page from list_markets using offset pagination."""
+        params = dict(filters or {})
+        base_limit = max(1, int(params.get("limit") or page_limit))
+        params["limit"] = base_limit
+        offset = int(params.get("offset") or 0)
+
+        markets: list[Market] = []
+        seen: set[str] = set()
+        while True:
+            params["offset"] = offset
+            page = await self.client.list_markets(params, force_refresh=force_refresh)
+            if not page:
+                break
+
+            added = 0
+            for market in page:
+                if market.market_id in seen:
+                    continue
+                seen.add(market.market_id)
+                markets.append(market)
+                added += 1
+
+            if len(page) < base_limit or added == 0:
+                break
+            offset += base_limit
+
+        return markets
+
     def _select_discovered_markets(
         self,
         markets: list[Market],
         *,
-        limit: int,
+        limit: Optional[int],
     ) -> list[Market]:
         """Round-robin across event/question buckets so we use all 200 slots better."""
+        if limit is not None and limit <= 0:
+            return []
         buckets: dict[str, list[Market]] = {}
         for market in markets:
             buckets.setdefault(self._discovery_bucket_key(market), []).append(market)
@@ -270,10 +307,10 @@ class DataFeed:
 
         selected: list[Market] = []
         seen: set[str] = set()
-        while len(selected) < limit:
+        while limit is None or len(selected) < limit:
             progress = False
             for bucket_markets in ordered_buckets:
-                if len(selected) >= limit:
+                if limit is not None and len(selected) >= limit:
                     break
                 if not bucket_markets:
                     continue
@@ -310,7 +347,7 @@ class DataFeed:
                     "volumeNumMin": 500,
                     "liquidityNumMin": 200,
                 }
-                markets = await self.client.list_markets(discovery_filters)
+                markets = await self._list_markets_all(discovery_filters)
 
                 # Polymarket US currently has only ~20 markets meeting the strict
                 # liquidity bar. If we got few (or none), top up with the looser
@@ -318,7 +355,7 @@ class DataFeed:
                 # without giving up the high-liquidity bias entirely.
                 if len(markets) < 50:
                     strict_count = len(markets)
-                    fallback = await self.client.list_markets(
+                    fallback = await self._list_markets_all(
                         {
                             "active": True,
                             "closed": False,
@@ -354,9 +391,11 @@ class DataFeed:
                         or (market.no_price > 0)
                     )
                 ]
+                monitor_cfg = getattr(self.config, "monitoring", None)
+                max_monitored = int(getattr(monitor_cfg, "max_monitored_markets", 200) or 0)
                 selected_markets = self._select_discovered_markets(
                     liquid_markets if liquid_markets else markets,
-                    limit=200,
+                    limit=max_monitored if max_monitored > 0 else None,
                 )
                 mm_friendly_selected = sum(
                     1 for market in selected_markets if self._is_mm_friendly_market(market)

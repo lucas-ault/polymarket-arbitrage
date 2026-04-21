@@ -135,6 +135,12 @@ class MonitoringConfig:
     """Monitoring configuration."""
     snapshot_interval: float = 60.0
     heartbeat_interval: float = 30.0
+    # Maximum number of Polymarket markets to monitor. 0 means "no cap" and
+    # keeps every discovered market active in the rotation.
+    max_monitored_markets: int = 200
+    # Max markets serialized to the dashboard websocket / /api/state payloads.
+    # 0 means "send all". Large values can increase browser memory/CPU use.
+    dashboard_market_limit: int = 300
     track_latency: bool = True
     track_fill_rates: bool = True
     orderbook_active_batch_size: int = 500
@@ -387,6 +393,10 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("monitoring.orderbook_request_batch_size must be positive")
     if config.monitoring.orderbook_fetch_concurrency <= 0:
         errors.append("monitoring.orderbook_fetch_concurrency must be positive")
+    if config.monitoring.max_monitored_markets < 0:
+        errors.append("monitoring.max_monitored_markets must be non-negative")
+    if config.monitoring.dashboard_market_limit < 0:
+        errors.append("monitoring.dashboard_market_limit must be non-negative")
     
     # Cache validation
     if config.cache.backend.lower() not in {"redis"}:

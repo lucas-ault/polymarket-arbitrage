@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from dashboard.server import dashboard_state
+from polymarket_client.models import TokenType
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class DashboardIntegration:
         portfolio=None,
         profit_telemetry=None,
         mode: str = "dry_run",
+        ws_market_limit: Optional[int] = None,
     ):
         self.data_feed = data_feed
         self.arb_engine = arb_engine
@@ -46,8 +48,72 @@ class DashboardIntegration:
         self._update_task: Optional[asyncio.Task] = None
         self._running = False
         self._loop_count = 0
-        self._ws_market_limit = 250
+        self._ws_market_limit = ws_market_limit
         self._full_market_refresh_interval = 30
+
+    def _estimate_position_mark(self, market_id: str, token_type: TokenType) -> Optional[float]:
+        """Best-effort current mark for portfolio display."""
+        if not self.data_feed:
+            return None
+        state = self.data_feed.get_market_state(market_id)
+        if state is None:
+            return None
+
+        if token_type == TokenType.YES:
+            bid = state.order_book.best_bid_yes
+            ask = state.order_book.best_ask_yes
+            fallback = state.market.yes_price
+        else:
+            bid = state.order_book.best_bid_no
+            ask = state.order_book.best_ask_no
+            fallback = state.market.no_price
+
+        if bid is not None and ask is not None:
+            return (float(bid) + float(ask)) / 2.0
+        if ask is not None:
+            return float(ask)
+        if bid is not None:
+            return float(bid)
+        if fallback:
+            return float(fallback)
+        return None
+
+    def _serialize_positions(self) -> list[dict]:
+        """Flatten portfolio positions for the dashboard UI."""
+        if not self.portfolio:
+            return []
+
+        rows: list[dict] = []
+        for market_id, by_token in self.portfolio.get_all_positions().items():
+            market = self.data_feed.get_market(market_id) if self.data_feed else None
+            question = getattr(market, "question", "") or market_id
+            for token_type, position in (by_token or {}).items():
+                size = float(getattr(position, "size", 0.0) or 0.0)
+                if size == 0:
+                    continue
+                current_price = self._estimate_position_mark(market_id, token_type)
+                unrealized = (
+                    float(position.unrealized_pnl(current_price))
+                    if current_price is not None
+                    else None
+                )
+                rows.append(
+                    {
+                        "market_id": market_id,
+                        "question": question,
+                        "token_type": token_type.value,
+                        "size": size,
+                        "avg_entry_price": float(getattr(position, "avg_entry_price", 0.0) or 0.0),
+                        "cost_basis": float(getattr(position, "cost_basis", 0.0) or 0.0),
+                        "notional": float(getattr(position, "notional", 0.0) or 0.0),
+                        "realized_pnl": float(getattr(position, "realized_pnl", 0.0) or 0.0),
+                        "current_price": current_price,
+                        "unrealized_pnl": unrealized,
+                    }
+                )
+
+        rows.sort(key=lambda row: abs(float(row.get("notional", 0.0) or 0.0)), reverse=True)
+        return rows
     
     async def start(self, update_interval: float = 1.0) -> None:
         """Start the dashboard integration."""
@@ -115,6 +181,7 @@ class DashboardIntegration:
         # Update portfolio
         if self.portfolio:
             summary = self.portfolio.get_summary()
+            summary["positions"] = self._serialize_positions()
             dashboard_state.portfolio = summary
         
         # Update risk

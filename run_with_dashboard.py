@@ -152,6 +152,11 @@ class TradingBotWithDashboard:
             portfolio=self.portfolio,
             profit_telemetry=self.profit_telemetry,
             mode="dry_run" if self.config.is_dry_run else "live",
+            ws_market_limit=(
+                None
+                if int(getattr(self.config.monitoring, "dashboard_market_limit", 300) or 0) <= 0
+                else int(getattr(self.config.monitoring, "dashboard_market_limit", 300))
+            ),
         )
         await self.dashboard_integration.start()
         

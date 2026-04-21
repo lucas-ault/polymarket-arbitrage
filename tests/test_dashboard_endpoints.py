@@ -85,3 +85,16 @@ def test_state_endpoint_includes_profit_telemetry_field():
     assert resp.status_code == 200
     body = resp.json()
     assert "profit_telemetry" in body
+
+
+def test_state_endpoint_market_limit_zero_returns_all_markets():
+    _reset_state()
+    dashboard_state.markets = {
+        "m1": {"market_id": "m1"},
+        "m2": {"market_id": "m2"},
+    }
+    client = TestClient(create_app())
+    resp = client.get("/api/state?market_limit=0")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["markets"]) == 2

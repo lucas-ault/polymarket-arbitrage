@@ -13,16 +13,16 @@ api:
   retry_delay_seconds: 1
 
 trading:
-  # Empty list means full auto-discovery from Gamma.
+  # Empty list means full auto-discovery from polymarket.us.
   markets: []
-  min_edge: 0.025
+  min_edge: 0.04
   bundle_arb_enabled: true
   min_spread: 0.07
   tick_size: 0.01
-  mm_enabled: true
-  default_order_size: 3
-  min_order_size: 2
-  max_order_size: 6
+  mm_enabled: false
+  default_order_size: 1
+  min_order_size: 1
+  max_order_size: 2
   slippage_tolerance: 0.01
   order_timeout_seconds: 60
   fee_mode: "polymarket_us"
@@ -32,10 +32,10 @@ trading:
   fee_theta_maker: -0.0125
 
 risk:
-  max_position_per_market: 10
-  max_global_exposure: 50
-  max_daily_loss: 6
-  max_drawdown_pct: 0.15
+  max_position_per_market: 5
+  max_global_exposure: 20
+  max_daily_loss: 3
+  max_drawdown_pct: 0.12
   trade_only_high_volume: false
   min_24h_volume: 0
   whitelist: []
@@ -46,15 +46,15 @@ risk:
 mode:
   trading_mode: "dry_run"
   data_mode: "real"
-  cross_platform_enabled: true
-  kalshi_enabled: true
+  cross_platform_enabled: false
+  kalshi_enabled: false
   min_match_similarity: 0.78
   cross_platform_match_start_delay_seconds: 5.0
   cross_platform_match_process_workers: 3
   cross_platform_candidate_limit: 220
-  dry_run_initial_balance: 10000
+  dry_run_initial_balance: 20
   simulate_fills: true
-  fill_probability: 0.03
+  fill_probability: 0.2
 
 logging:
   console_level: "INFO"

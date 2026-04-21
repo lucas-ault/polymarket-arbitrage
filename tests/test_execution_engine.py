@@ -2,6 +2,8 @@
 Tests for execution queue behavior and backpressure.
 """
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from core.execution import ExecutionConfig, ExecutionEngine
@@ -190,3 +192,29 @@ async def test_group_cancel_signal_resolves_open_orders_at_execution_time():
 
     assert client.calls == [("ord-buy", "slug-1"), ("ord-sell", "slug-1")]
     assert "ord-newer" in engine._open_orders
+
+
+@pytest.mark.asyncio
+async def test_handle_place_orders_counts_unplaceable_skip():
+    engine = _build_engine(max_queue=3)
+    engine._unplaceable_until["m-1"] = datetime.utcnow() + timedelta(seconds=60)
+
+    signal = Signal(
+        signal_id="s1",
+        action="place_orders",
+        market_id="m-1",
+        orders=[
+            {
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": 0.5,
+                "size": 1.0,
+            }
+        ],
+    )
+
+    await engine._handle_place_orders(signal)
+
+    assert engine.stats.signals_rejected == 1
+    assert engine.stats.unplaceable_signal_skips == 1
+    assert engine.unplaceable_market_count == 1

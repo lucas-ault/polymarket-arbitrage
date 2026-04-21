@@ -17,6 +17,7 @@ from polymarket_client.models import (
     MarketState,
     Opportunity,
     OpportunityType,
+    Order,
     OrderBook,
     OrderSide,
     Signal,
@@ -812,4 +813,50 @@ class ArbEngine:
     def get_stats(self) -> ArbStats:
         """Get engine statistics."""
         return self.stats
+
+    def get_market_making_metrics(
+        self,
+        market_states: dict[str, MarketState],
+        open_orders: Optional[list[Order]] = None,
+    ) -> dict[str, int]:
+        """Summarize the current MM-ready and currently quoted universe."""
+        eligible_markets: set[str] = set()
+        eligible_legs = 0
+
+        for market_id, state in market_states.items():
+            for token_type, book in (
+                (TokenType.YES, state.order_book.yes),
+                (TokenType.NO, state.order_book.no),
+            ):
+                if not self._mm_conditions_hold(book):
+                    continue
+                if self._position_probe is not None:
+                    try:
+                        if abs(float(self._position_probe(market_id, token_type))) > 0:
+                            continue
+                    except Exception:
+                        logger.debug(
+                            "Position probe failed while building MM metrics for %s/%s",
+                            market_id,
+                            token_type.value,
+                            exc_info=True,
+                        )
+                        continue
+                eligible_markets.add(market_id)
+                eligible_legs += 1
+
+        quoted_markets: set[str] = set()
+        quoted_legs: set[tuple[str, TokenType]] = set()
+        for order in open_orders or []:
+            if order.strategy_tag != "market_making":
+                continue
+            quoted_markets.add(order.market_id)
+            quoted_legs.add((order.market_id, order.token_type))
+
+        return {
+            "mm_eligible_markets": len(eligible_markets),
+            "mm_eligible_legs": eligible_legs,
+            "mm_quoted_markets": len(quoted_markets),
+            "mm_quoted_legs": len(quoted_legs),
+        }
 

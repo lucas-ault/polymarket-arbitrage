@@ -62,6 +62,7 @@ class ExecutionStats:
     signals_processed: int = 0
     signals_rejected: int = 0
     slippage_rejections: int = 0
+    unplaceable_signal_skips: int = 0
     signal_queue_drops: int = 0
     max_signal_queue_depth: int = 0
 
@@ -101,6 +102,7 @@ class ExecutionEngine:
         # signals for them until this timestamp passes. Keeps the log readable
         # and stops us burning rate-limit budget on dead markets.
         self._unplaceable_until: dict[str, datetime] = {}
+        self._last_unplaceable_skip_log: dict[str, datetime] = {}
         
         # Signal queue
         self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue(maxsize=self.config.max_signal_queue_size)
@@ -239,6 +241,22 @@ class ExecutionEngine:
             # decided to skip this market. Counts as a rejection so dashboards
             # still see the pressure.
             self.stats.signals_rejected += len(signal.orders) or 1
+            self.stats.unplaceable_signal_skips += 1
+            until = self._unplaceable_until.get(signal.market_id)
+            now = datetime.utcnow()
+            last_logged = self._last_unplaceable_skip_log.get(signal.market_id)
+            if last_logged is None or (now - last_logged).total_seconds() >= 30.0:
+                remaining = (
+                    max(0.0, (until - now).total_seconds())
+                    if until is not None
+                    else 0.0
+                )
+                logger.info(
+                    "Skipping place_orders for market %s: marked unplaceable for another %.0fs",
+                    signal.market_id,
+                    remaining,
+                )
+                self._last_unplaceable_skip_log[signal.market_id] = now
             return
 
         for order_spec in signal.orders:
@@ -664,6 +682,16 @@ class ExecutionEngine:
     def get_stats(self) -> ExecutionStats:
         """Get execution statistics."""
         return self.stats
+
+    @property
+    def unplaceable_market_count(self) -> int:
+        """Return number of markets currently blacklisted for placement."""
+        now = datetime.utcnow()
+        expired = [market_id for market_id, until in self._unplaceable_until.items() if now >= until]
+        for market_id in expired:
+            self._unplaceable_until.pop(market_id, None)
+            self._last_unplaceable_skip_log.pop(market_id, None)
+        return len(self._unplaceable_until)
     
     @property
     def open_order_count(self) -> int:

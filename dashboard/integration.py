@@ -230,6 +230,7 @@ class DashboardIntegration:
                 "orders_rejected": stats.orders_rejected,
                 "signals_rejected": stats.signals_rejected,
                 "slippage_rejections": stats.slippage_rejections,
+                "unplaceable_signal_skips": stats.unplaceable_signal_skips,
                 "signals_processed": stats.signals_processed,
             }
         
@@ -247,9 +248,11 @@ class DashboardIntegration:
         
         # Update operational stats
         if self.data_feed:
+            all_market_states = self.data_feed.get_all_market_states()
+
             if self._loop_count % self._full_market_refresh_interval == 0:
                 # Keep state in sync in case any market is missed by incremental flow.
-                for market_id, state in self.data_feed.get_all_market_states().items():
+                for market_id, state in all_market_states.items():
                     if market_id not in dashboard_state.markets:
                         ob = state.order_book
                         dashboard_state.markets[market_id] = {
@@ -272,7 +275,23 @@ class DashboardIntegration:
             staleness = self.data_feed.get_staleness_summary()
             feed_stats = self.data_feed.get_runtime_stats()
             client_stats = self.data_feed.client.get_runtime_stats()
+            open_orders = self.execution_engine.get_open_orders() if self.execution_engine else []
             queue_size = self.execution_engine.signal_queue_size if self.execution_engine else 0
+            mm_metrics = (
+                self.arb_engine.get_market_making_metrics(all_market_states, open_orders)
+                if self.arb_engine
+                else {
+                    "mm_eligible_markets": 0,
+                    "mm_eligible_legs": 0,
+                    "mm_quoted_markets": 0,
+                    "mm_quoted_legs": 0,
+                }
+            )
+            unplaceable_count = (
+                self.execution_engine.unplaceable_market_count
+                if self.execution_engine
+                else 0
+            )
             dashboard_state.operational = {
                 "total_markets": len(self.data_feed.market_ids),
                 "markets_with_orderbooks": len(dashboard_state.markets),
@@ -280,6 +299,7 @@ class DashboardIntegration:
                 "orderbook_updates": self.data_feed.update_count,
                 "is_streaming": self.data_feed.is_running,
                 "signal_queue_size": queue_size,
+                "unplaceable_markets": unplaceable_count,
                 "avg_staleness_seconds": staleness["avg_staleness_seconds"],
                 "p95_staleness_seconds": staleness["p95_staleness_seconds"],
                 "max_staleness_seconds": staleness["max_staleness_seconds"],
@@ -301,6 +321,7 @@ class DashboardIntegration:
                 "cache_errors": int(client_stats.get("cache_errors", 0)),
                 "cache_last_read_ms": client_stats.get("cache_last_read_ms", 0.0),
                 "cache_last_write_ms": client_stats.get("cache_last_write_ms", 0.0),
+                **mm_metrics,
             }
         
         if self.profit_telemetry is not None:

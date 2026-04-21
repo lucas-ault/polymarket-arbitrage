@@ -143,3 +143,85 @@ async def test_update_state_includes_take_profit_status():
     assert positions[0]["take_profit_threshold_usd"] == 0.20
     assert "take_profit_progress_pct" in positions[0]
     assert "take_profit_net_profit_est" in positions[0]
+
+
+@pytest.mark.asyncio
+async def test_update_state_includes_mm_and_unplaceable_operational_metrics():
+    dashboard_state.markets = {}
+    dashboard_state.portfolio = {}
+    dashboard_state.operational = {}
+    dashboard_state.stats = {}
+
+    market = Market(
+        market_id="m1",
+        condition_id="m1",
+        question="Will Team A win?",
+        yes_price=0.55,
+        no_price=0.45,
+    )
+    state = MarketState(
+        market=market,
+        order_book=OrderBook(market_id="m1"),
+        timestamp=datetime.utcnow(),
+    )
+    feed = _DummyFeed(state)
+
+    class _Exec:
+        signal_queue_size = 3
+        unplaceable_market_count = 2
+
+        def get_open_orders(self, market_id=None):
+            return []
+
+        def get_stats(self):
+            return type(
+                "_Stats",
+                (),
+                {
+                    "orders_placed": 0,
+                    "orders_filled": 0,
+                    "orders_cancelled": 0,
+                    "orders_rejected": 0,
+                    "signals_rejected": 0,
+                    "slippage_rejections": 0,
+                    "unplaceable_signal_skips": 4,
+                    "signals_processed": 0,
+                },
+            )()
+
+    class _Arb:
+        def get_stats(self):
+            return type(
+                "_ArbStats",
+                (),
+                {
+                    "bundle_opportunities_detected": 0,
+                    "mm_opportunities_detected": 0,
+                    "signals_generated": 0,
+                },
+            )()
+
+        def get_timing_stats(self):
+            return {}
+
+        def get_market_making_metrics(self, market_states, open_orders):
+            assert "m1" in market_states
+            return {
+                "mm_eligible_markets": 1,
+                "mm_eligible_legs": 2,
+                "mm_quoted_markets": 0,
+                "mm_quoted_legs": 0,
+            }
+
+    integration = DashboardIntegration(
+        data_feed=feed,
+        arb_engine=_Arb(),
+        execution_engine=_Exec(),
+    )
+    await integration._update_state()
+
+    assert dashboard_state.operational["mm_eligible_markets"] == 1
+    assert dashboard_state.operational["mm_eligible_legs"] == 2
+    assert dashboard_state.operational["mm_quoted_markets"] == 0
+    assert dashboard_state.operational["unplaceable_markets"] == 2
+    assert dashboard_state.stats["unplaceable_signal_skips"] == 4

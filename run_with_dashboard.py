@@ -397,8 +397,19 @@ class TradingBotWithDashboard:
                 orders_cancelled = int(getattr(exec_stats, "orders_cancelled", 0) or 0)
                 orders_rejected = int(getattr(exec_stats, "orders_rejected", 0) or 0)
                 signals_rejected = int(getattr(exec_stats, "signals_rejected", 0) or 0)
+                unplaceable_skips = int(getattr(exec_stats, "unplaceable_signal_skips", 0) or 0)
                 open_orders = int(self.execution_engine.open_order_count) if self.execution_engine else 0
                 queue_depth = int(self.execution_engine.signal_queue_size) if self.execution_engine else 0
+                unplaceable_markets = (
+                    int(self.execution_engine.unplaceable_market_count)
+                    if self.execution_engine else 0
+                )
+                mm_metrics = {"mm_eligible_markets": 0, "mm_quoted_markets": 0}
+                if self.arb_engine and self.data_feed:
+                    mm_metrics = self.arb_engine.get_market_making_metrics(
+                        self.data_feed.get_all_market_states(),
+                        self.execution_engine.get_open_orders() if self.execution_engine else [],
+                    )
 
                 new_signals = signal_count - last_signal_count
                 new_orders = orders_placed - last_order_count
@@ -433,6 +444,7 @@ class TradingBotWithDashboard:
                     "heartbeat | markets=%d | signals(total/new60s)=%d/%d | "
                     "orders_placed/filled=%d/%d (new placed in 60s=%d) | "
                     "open/cxl/rej/sigrej=%d/%d/%d/%d | queue=%d | "
+                    "mm(pass/quoted)=%d/%d | unplaceable=%d | skip_unplaceable=%d | "
                     "session PnL=$%.2f | exposure=$%.2f%s%s",
                     markets_tracked,
                     signal_count,
@@ -445,6 +457,10 @@ class TradingBotWithDashboard:
                     orders_rejected,
                     signals_rejected,
                     queue_depth,
+                    int(mm_metrics.get("mm_eligible_markets", 0)),
+                    int(mm_metrics.get("mm_quoted_markets", 0)),
+                    unplaceable_markets,
+                    unplaceable_skips,
                     float(pnl.get("total_pnl", 0.0)),
                     float(exposure),
                     " | KILL SWITCH ACTIVE" if kill_switch else "",

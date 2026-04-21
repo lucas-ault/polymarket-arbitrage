@@ -943,8 +943,29 @@ class PolymarketClient(BasePolymarketClient):
                 self._simulated_orders[order_id].status = OrderStatus.CANCELLED
             return
         if self._sdk_client:
-            await self._sdk_client.orders.cancel(order_id)
-            return
+            sdk_cancel = self._sdk_client.orders.cancel
+            sdk_errors: list[Exception] = []
+            # Support SDK variants where cancel expects either:
+            #   cancel(order_id) OR cancel(order_id, params)
+            cancel_arg_variants: tuple[tuple[Any, ...], ...] = (
+                (order_id,),
+                (order_id, {}),
+                (order_id, {"orderId": order_id}),
+                (order_id, {"order_id": order_id}),
+                (order_id, {"id": order_id}),
+            )
+            for args in cancel_arg_variants:
+                try:
+                    await sdk_cancel(*args)
+                    return
+                except Exception as exc:
+                    sdk_errors.append(exc)
+            if sdk_errors:
+                logger.warning(
+                    "SDK order cancel failed for %s; falling back to REST cancel: %s",
+                    order_id,
+                    sdk_errors[-1],
+                )
         await self._request("POST", f"/v1/order/{order_id}/cancel", use_private=True)
 
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:

@@ -83,3 +83,44 @@ async def test_cancel_order_passes_market_slug_for_live_cancel():
 
     assert cancelled is True
     assert client.calls == [("ord-1", "slug-1")]
+
+
+def test_build_cancel_signal_filters_market_strategy_and_token():
+    engine = _build_engine(max_queue=3)
+    engine._track_order(Order(
+        order_id="ord-yes-mm",
+        market_id="m-1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="market_making",
+    ))
+    engine._track_order(Order(
+        order_id="ord-no-mm",
+        market_id="m-1",
+        token_type=TokenType.NO,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="market_making",
+    ))
+    engine._track_order(Order(
+        order_id="ord-other",
+        market_id="m-1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="bundle_arb",
+    ))
+
+    signal = engine.build_cancel_signal(
+        market_id="m-1",
+        strategy_tag="market_making",
+        token_type=TokenType.YES,
+    )
+
+    assert signal is not None
+    assert signal.action == "cancel_orders"
+    assert signal.cancel_order_ids == ["ord-yes-mm"]

@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core.execution import ExecutionConfig, ExecutionEngine
-from polymarket_client.models import OrderSide, Signal, TokenType
+from polymarket_client.models import Order, OrderSide, Signal, TokenType
 
 
 def _build_engine(
@@ -130,3 +130,34 @@ def test_permanent_error_classifier_matches_known_phrases():
     ]
     for msg, expected in cases:
         assert ExecutionEngine._is_permanent_order_error(Exception(msg)) is expected, msg
+
+
+def test_track_order_uses_shorter_timeout_for_market_making():
+    engine = _build_engine(place_side_effect=Exception("not used"))
+    engine.config.order_timeout_seconds = 60.0
+    engine.config.mm_order_timeout_seconds = 9.0
+
+    mm_order = Order(
+        order_id="ord-mm",
+        market_id="m1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="market_making",
+    )
+    arb_order = Order(
+        order_id="ord-arb",
+        market_id="m1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="bundle_arb",
+    )
+
+    engine._track_order(mm_order)
+    engine._track_order(arb_order)
+
+    assert engine._order_timeouts_seconds["ord-mm"] == 9.0
+    assert engine._order_timeouts_seconds["ord-arb"] == 60.0

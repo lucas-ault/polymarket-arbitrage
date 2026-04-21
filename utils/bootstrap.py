@@ -27,6 +27,7 @@ from core.data_feed import DataFeed
 from core.execution import ExecutionConfig, ExecutionEngine
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
+from polymarket_client.models import TokenType
 from utils.config_loader import BotConfig
 from utils.redis_cache import RedisCacheConfig, create_cache_store
 
@@ -141,6 +142,7 @@ async def bootstrap_components(
         config=ExecutionConfig(
             slippage_tolerance=config.trading.slippage_tolerance,
             order_timeout_seconds=config.trading.order_timeout_seconds,
+            mm_order_timeout_seconds=config.trading.mm_order_timeout_seconds,
             unplaceable_market_skip_seconds=config.trading.unplaceable_market_skip_seconds,
             dry_run=config.is_dry_run,
         ),
@@ -202,6 +204,24 @@ async def bootstrap_components(
             return 0.0
         return abs(float(getattr(position, "size", 0.0) or 0.0))
     arb_engine.set_position_probe(_position_probe)
+
+    def _on_opportunity_expired(market_id: str, opportunity_type: str) -> None:
+        if opportunity_type not in {
+            "mm_bid",
+            "mm_ask",
+        }:
+            return
+        token_type = TokenType.YES if opportunity_type == "mm_bid" else TokenType.NO
+        signal = execution_engine.build_cancel_signal(
+            market_id=market_id,
+            strategy_tag="market_making",
+            token_type=token_type,
+            priority=10,
+        )
+        if signal is not None:
+            execution_engine.submit_signal_nowait(signal)
+
+    arb_engine.set_expiry_callback(_on_opportunity_expired)
 
     if position_refresh_interval is None:
         position_refresh_interval = 30.0 if config.is_live else 5.0

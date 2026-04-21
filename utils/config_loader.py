@@ -71,6 +71,9 @@ class TradingConfig:
     max_order_size: float = 200.0
     slippage_tolerance: float = 0.02
     order_timeout_seconds: float = 60.0
+    # MM quotes should die much faster than directional / arb orders because
+    # the inside spread often disappears within a second.
+    mm_order_timeout_seconds: float = 12.0
     # When the API returns a permanent error for a market (e.g. "market not
     # found", 404), the execution engine drops further attempts on it for
     # this many seconds. Set to 0 to disable.

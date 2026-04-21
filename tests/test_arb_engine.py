@@ -202,6 +202,47 @@ class TestMarketMaking:
         mm_signals = [s for s in signals if s.opportunity and s.opportunity.is_market_making]
         assert len(mm_signals) == 0
 
+    def test_mm_opportunity_stays_tracked_while_conditions_hold(self, arb_engine: ArbEngine):
+        order_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.45,
+            yes_ask=0.55,
+            no_bid=0.40,
+            no_ask=0.50,
+        )
+
+        state = create_market_state(order_book)
+        arb_engine.analyze(state)
+        assert "test_market_mm_bid" in arb_engine._active_opportunities
+
+        arb_engine._check_expired_opportunities("test_market", order_book)
+
+        assert "test_market_mm_bid" in arb_engine._active_opportunities
+
+    def test_mm_expiry_callback_fires_when_market_making_edge_disappears(self, arb_engine: ArbEngine):
+        expired = []
+        arb_engine.set_expiry_callback(lambda market_id, opportunity_type: expired.append((market_id, opportunity_type)))
+
+        wide_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.45,
+            yes_ask=0.55,
+            no_bid=0.40,
+            no_ask=0.50,
+        )
+        arb_engine.analyze(create_market_state(wide_book))
+
+        tight_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.49,
+            yes_ask=0.51,
+            no_bid=0.49,
+            no_ask=0.51,
+        )
+        arb_engine._check_expired_opportunities("test_market", tight_book)
+
+        assert ("test_market", OpportunityType.MM_BID.value) in expired
+
 
 class TestSignalGeneration:
     """Tests for signal generation."""

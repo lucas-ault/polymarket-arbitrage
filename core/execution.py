@@ -36,6 +36,9 @@ class ExecutionConfig:
     """Configuration for the execution engine."""
     slippage_tolerance: float = 0.02  # Max allowed price slippage
     order_timeout_seconds: float = 60.0  # Cancel unfilled orders after this time
+    # MM quotes decay much faster than arbitrage legs. Keep them on-book for a
+    # much shorter window so stale maker quotes don't sit for a full minute.
+    mm_order_timeout_seconds: float = 12.0
     max_retries: int = 3
     retry_delay: float = 0.5
     enable_slippage_check: bool = True
@@ -87,6 +90,7 @@ class ExecutionEngine:
         # Track open orders
         self._open_orders: dict[str, Order] = {}
         self._order_timestamps: dict[str, datetime] = {}
+        self._order_timeouts_seconds: dict[str, float] = {}
         
         # Order tracking by market and strategy
         self._orders_by_market: dict[str, list[str]] = {}
@@ -426,6 +430,13 @@ class ExecutionEngine:
         """Add order to tracking structures."""
         self._open_orders[order.order_id] = order
         self._order_timestamps[order.order_id] = datetime.utcnow()
+        timeout_seconds = float(self.config.order_timeout_seconds)
+        if order.strategy_tag == "market_making":
+            timeout_seconds = max(
+                0.5,
+                float(getattr(self.config, "mm_order_timeout_seconds", timeout_seconds) or timeout_seconds),
+            )
+        self._order_timeouts_seconds[order.order_id] = timeout_seconds
         
         # Track by market
         if order.market_id not in self._orders_by_market:
@@ -446,6 +457,8 @@ class ExecutionEngine:
             
             if order_id in self._order_timestamps:
                 del self._order_timestamps[order_id]
+            if order_id in self._order_timeouts_seconds:
+                del self._order_timeouts_seconds[order_id]
             
             # Remove from market tracking
             if order.market_id in self._orders_by_market:
@@ -488,6 +501,34 @@ class ExecutionEngine:
         
         logger.info(f"Cancelled {cancelled} orders")
         return cancelled
+
+    def build_cancel_signal(
+        self,
+        *,
+        market_id: str,
+        strategy_tag: Optional[str] = None,
+        token_type: Optional[TokenType] = None,
+        priority: int = 9,
+    ) -> Optional[Signal]:
+        """Create a cancel signal for currently open tracked orders."""
+        order_ids: list[str] = []
+        for order in self.get_open_orders(market_id=market_id):
+            if strategy_tag and order.strategy_tag != strategy_tag:
+                continue
+            if token_type is not None and order.token_type != token_type:
+                continue
+            order_ids.append(order.order_id)
+
+        if not order_ids:
+            return None
+
+        return Signal(
+            signal_id=f"sig_cancel_{uuid.uuid4().hex[:12]}",
+            action="cancel_orders",
+            market_id=market_id,
+            cancel_order_ids=order_ids,
+            priority=priority,
+        )
     
     async def cancel_orders_by_strategy(self, strategy_tag: str) -> int:
         """Cancel all orders for a specific strategy."""
@@ -507,11 +548,17 @@ class ExecutionEngine:
                 await asyncio.sleep(10)  # Check every 10 seconds
                 
                 now = datetime.utcnow()
-                timeout_delta = timedelta(seconds=self.config.order_timeout_seconds)
                 
                 timed_out = [
                     order_id for order_id, timestamp in self._order_timestamps.items()
-                    if now - timestamp > timeout_delta
+                    if now - timestamp > timedelta(
+                        seconds=float(
+                            self._order_timeouts_seconds.get(
+                                order_id,
+                                self.config.order_timeout_seconds,
+                            )
+                        )
+                    )
                 ]
                 
                 for order_id in timed_out:

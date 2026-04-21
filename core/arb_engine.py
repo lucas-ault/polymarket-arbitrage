@@ -11,7 +11,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from polymarket_client.models import (
     MarketState,
@@ -157,6 +157,10 @@ class ArbEngine:
         # Signature: (market_id: str, token_type: TokenType) -> float.
         # Should return current absolute position size (contracts) on that leg.
         self._position_probe = None
+        # Optional callback invoked when a tracked opportunity expires. Used to
+        # cancel stale maker quotes immediately instead of waiting for the
+        # execution timeout monitor.
+        self._expiry_callback: Optional[Callable[[str, str], None]] = None
 
         logger.info(f"ArbEngine initialized with min_edge={config.min_edge}, min_spread={config.min_spread}")
 
@@ -187,6 +191,10 @@ class ArbEngine:
         accumulation in event-futures markets.
         """
         self._position_probe = probe
+
+    def set_expiry_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when an opportunity expires."""
+        self._expiry_callback = callback
     
     def analyze(self, market_state: MarketState) -> list[Signal]:
         """
@@ -240,6 +248,10 @@ class ArbEngine:
                     total_bid = order_book.best_bid_yes + order_book.best_bid_no
                     if total_bid - 1.0 >= self.config.min_edge * 0.5:
                         still_valid = True
+            elif timing.opportunity_type == OpportunityType.MM_BID.value:
+                still_valid = self._mm_conditions_hold(order_book.yes)
+            elif timing.opportunity_type == OpportunityType.MM_ASK.value:
+                still_valid = self._mm_conditions_hold(order_book.no)
             
             # Also expire if too old (10 seconds max)
             age_seconds = (now - timing.detected_at).total_seconds()
@@ -249,6 +261,11 @@ class ArbEngine:
             if not still_valid:
                 timing.mark_expired(executed=False)
                 self._record_opportunity_duration(timing)
+                if self._expiry_callback is not None:
+                    try:
+                        self._expiry_callback(timing.market_id, timing.opportunity_type)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("expiry callback failed for %s: %s", timing.market_id, exc)
                 expired_keys.append(key)
         
         for key in expired_keys:
@@ -589,6 +606,29 @@ class ArbEngine:
             signals.append(no_signal)
         
         return signals
+
+    def _mm_conditions_hold(self, token_book) -> bool:
+        """Return True if a token book still satisfies MM gating rules."""
+        best_bid = token_book.best_bid
+        best_ask = token_book.best_ask
+        spread = token_book.spread
+        if spread is None or best_bid is None or best_ask is None:
+            return False
+        if spread < self.config.min_spread:
+            return False
+        if self.config.mm_max_spread > 0 and spread > self.config.mm_max_spread:
+            return False
+
+        midpoint = (best_bid + best_ask) / 2.0
+        if midpoint < self.config.mm_min_price or midpoint > self.config.mm_max_price:
+            return False
+
+        our_bid = best_bid + self.config.tick_size
+        our_ask = best_ask - self.config.tick_size
+        if our_ask <= our_bid:
+            return False
+        our_spread = our_ask - our_bid
+        return our_spread >= self.config.tick_size * 2
     
     def _check_mm_token(
         self,

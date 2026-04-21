@@ -79,6 +79,7 @@ class TradingBotWithDashboard:
         self._kalshi_task = None
         self._fill_task = None
         self._live_fill_task = None
+        self._private_ws_task = None
         self._portfolio_sync_task = None
         self._heartbeat_task = None
         self._stopping = False
@@ -164,6 +165,10 @@ class TradingBotWithDashboard:
         if self.config.is_dry_run and self.config.mode.simulate_fills:
             self._fill_task = asyncio.create_task(self._simulate_fills(), name="simulate_fills")
         elif not self.config.is_dry_run:
+            self._private_ws_task = asyncio.create_task(
+                self._consume_live_private_updates(),
+                name="consume_live_private_updates",
+            )
             # Keep portfolio/risk/dashboard in sync with exchange fills in live mode.
             self._live_fill_task = asyncio.create_task(
                 self._poll_live_fills(),
@@ -452,7 +457,7 @@ class TradingBotWithDashboard:
             return
         while self._running:
             try:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(10.0)
                 trades = await self.client.get_trades(limit=200)
                 if not trades:
                     continue
@@ -468,28 +473,55 @@ class TradingBotWithDashboard:
                     continue
                 # Process oldest first so position/PnL updates are monotonic.
                 for trade in sorted(trades, key=lambda t: getattr(t, "timestamp", datetime.utcnow())):
-                    if not trade.trade_id or trade.trade_id in self._seen_trade_ids:
-                        continue
-                    self._seen_trade_ids.add(trade.trade_id)
-                    self.execution_engine.handle_fill(trade)
-                    if self.profit_telemetry:
-                        self.profit_telemetry.record_fill(
-                            market_id=trade.market_id,
-                            price=float(trade.price),
-                            size=float(trade.size),
-                            fee=float(trade.fee),
-                        )
-                    if self.dashboard_integration:
-                        self.dashboard_integration.add_trade(
-                            side=trade.side.value,
-                            price=trade.price,
-                            size=trade.size,
-                            market_id=trade.market_id,
-                        )
+                    self._process_live_trade(trade)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Live fill poll error: {e}")
+
+    def _process_live_trade(self, trade) -> None:
+        """Deduplicate and mirror a live fill into local state."""
+        if not trade or not getattr(trade, "trade_id", ""):
+            return
+        if trade.trade_id in self._seen_trade_ids:
+            return
+        self._seen_trade_ids.add(trade.trade_id)
+        self.execution_engine.handle_fill(trade)
+        if self.profit_telemetry:
+            self.profit_telemetry.record_fill(
+                market_id=trade.market_id,
+                price=float(trade.price),
+                size=float(trade.size),
+                fee=float(trade.fee),
+            )
+        if self.dashboard_integration:
+            self.dashboard_integration.add_trade(
+                side=trade.side.value,
+                price=trade.price,
+                size=trade.size,
+                market_id=trade.market_id,
+            )
+
+    async def _consume_live_private_updates(self) -> None:
+        """Consume private websocket events for real-time fills and account state."""
+        if not self.client or not self.execution_engine:
+            return
+        logger.info("Starting private websocket consumer for orders/positions/balance updates")
+        while self._running:
+            try:
+                async for event in self.client.stream_private_updates():
+                    if not self._running:
+                        break
+                    event_type = str(event.get("type") or "")
+                    if event_type == "order_update":
+                        trade = event.get("trade")
+                        if trade is not None:
+                            self._process_live_trade(trade)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("Private websocket consumer error: %s", exc)
+                await asyncio.sleep(1.0)
 
     async def _sync_live_portfolio_metrics(self) -> None:
         """Sync exchange portfolio API metrics into dashboard-visible summary.
@@ -745,6 +777,7 @@ class TradingBotWithDashboard:
                 logger.warning("Error during %s: %s", name, exc)
 
         await _cancel_task(self._fill_task, "simulate_fills")
+        await _cancel_task(self._private_ws_task, "consume_live_private_updates")
         await _cancel_task(self._live_fill_task, "poll_live_fills")
         await _cancel_task(self._portfolio_sync_task, "sync_live_portfolio_metrics")
         await _cancel_task(self._kalshi_task, "kalshi_monitoring")

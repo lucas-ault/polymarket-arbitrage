@@ -124,3 +124,69 @@ def test_build_cancel_signal_filters_market_strategy_and_token():
     assert signal is not None
     assert signal.action == "cancel_orders"
     assert signal.cancel_order_ids == ["ord-yes-mm"]
+
+
+@pytest.mark.asyncio
+async def test_group_cancel_signal_resolves_open_orders_at_execution_time():
+    class CapturingClient(DummyClient):
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def cancel_order(self, order_id, market_slug=None):
+            self.calls.append((order_id, market_slug))
+            return None
+
+    client = CapturingClient()
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=RiskManager(RiskConfig(trade_only_high_volume=False)),
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    engine._track_order(Order(
+        order_id="ord-buy",
+        market_id="m-1",
+        market_slug="slug-1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+        strategy_tag="market_making",
+        quote_group_id="group-a",
+    ))
+    engine._track_order(Order(
+        order_id="ord-sell",
+        market_id="m-1",
+        market_slug="slug-1",
+        token_type=TokenType.YES,
+        side=OrderSide.SELL,
+        price=0.51,
+        size=1.0,
+        strategy_tag="market_making",
+        quote_group_id="group-a",
+    ))
+    engine._track_order(Order(
+        order_id="ord-newer",
+        market_id="m-1",
+        market_slug="slug-1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.49,
+        size=1.0,
+        strategy_tag="market_making",
+        quote_group_id="group-b",
+    ))
+
+    signal = engine.build_cancel_signal(
+        market_id="m-1",
+        strategy_tag="market_making",
+        token_type=TokenType.YES,
+        quote_group_id="group-a",
+    )
+
+    assert signal is not None
+    assert signal.cancel_order_ids == []
+    await engine._handle_cancel_orders(signal)
+
+    assert client.calls == [("ord-buy", "slug-1"), ("ord-sell", "slug-1")]
+    assert "ord-newer" in engine._open_orders

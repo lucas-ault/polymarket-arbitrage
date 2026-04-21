@@ -66,6 +66,9 @@ class TradingConfig:
     mm_max_price: float = 0.90
     # How long to suppress repeat MM signals on the same (market, token).
     mm_cooldown_seconds: float = 5.0
+    # Require MM invalidation to persist briefly before canceling.
+    mm_invalidation_grace_seconds: float = 1.0
+    mm_invalidation_min_updates: int = 2
     default_order_size: float = 50.0
     min_order_size: float = 5.0
     max_order_size: float = 200.0
@@ -356,6 +359,10 @@ def _validate_config(config: BotConfig) -> None:
     
     if config.trading.default_order_size <= 0:
         errors.append("trading.default_order_size must be positive")
+    if config.trading.mm_invalidation_grace_seconds < 0:
+        errors.append("trading.mm_invalidation_grace_seconds must be non-negative")
+    if config.trading.mm_invalidation_min_updates < 1:
+        errors.append("trading.mm_invalidation_min_updates must be at least 1")
     
     # Risk validation
     if config.risk.max_position_per_market <= 0:

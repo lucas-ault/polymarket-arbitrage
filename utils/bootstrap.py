@@ -75,6 +75,8 @@ def _build_arb_engine(config: BotConfig) -> ArbEngine:
         mm_min_price=config.trading.mm_min_price,
         mm_max_price=config.trading.mm_max_price,
         mm_cooldown_seconds=config.trading.mm_cooldown_seconds,
+        mm_invalidation_grace_seconds=config.trading.mm_invalidation_grace_seconds,
+        mm_invalidation_min_updates=config.trading.mm_invalidation_min_updates,
         mm_enabled=config.trading.mm_enabled,
         tick_size=config.trading.tick_size,
         default_order_size=config.trading.default_order_size,
@@ -205,7 +207,7 @@ async def bootstrap_components(
         return abs(float(getattr(position, "size", 0.0) or 0.0))
     arb_engine.set_position_probe(_position_probe)
 
-    def _on_opportunity_expired(market_id: str, opportunity_type: str) -> None:
+    def _on_opportunity_expired(market_id: str, opportunity_type: str, opportunity_id: str) -> None:
         if opportunity_type not in {
             "mm_bid",
             "mm_ask",
@@ -216,6 +218,7 @@ async def bootstrap_components(
             market_id=market_id,
             strategy_tag="market_making",
             token_type=token_type,
+            quote_group_id=opportunity_id,
             priority=10,
         )
         if signal is not None:

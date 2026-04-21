@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from polymarket_client.api import PolymarketClient
+from polymarket_client.models import OrderSide, TokenType
 
 
 @pytest.mark.asyncio
@@ -243,3 +244,63 @@ async def test_get_portfolio_metrics_returns_partial_data_when_positions_fail():
     assert metrics["total_exposure"] == 11.0
     assert metrics["total_trades"] == 1
     assert metrics["pnl"]["realized_pnl"] == 0.0  # realized from positions unavailable
+
+
+def test_build_market_ws_subscriptions_uses_documented_camel_case_and_chunks():
+    client = PolymarketClient(dry_run=True)
+
+    market_slugs = [f"market-{idx}" for idx in range(205)]
+    subscriptions = client._build_market_ws_subscriptions(market_slugs)
+
+    assert len(subscriptions) == 6
+    first = subscriptions[0]["subscribe"]
+    second = subscriptions[1]["subscribe"]
+    last = subscriptions[-1]["subscribe"]
+    assert first["subscriptionType"] == "SUBSCRIPTION_TYPE_MARKET_DATA_LITE"
+    assert second["subscriptionType"] == "SUBSCRIPTION_TYPE_TRADE"
+    assert len(first["marketSlugs"]) == 100
+    assert len(last["marketSlugs"]) == 5
+    assert "requestId" in first
+    assert "marketSlugs" in first
+
+
+def test_trade_from_private_execution_parses_fill():
+    client = PolymarketClient(dry_run=True)
+    client._markets_by_slug["event-slug"] = client._parse_market(
+        {
+            "id": "15237",
+            "slug": "event-slug",
+            "question": "Will test pass?",
+            "active": True,
+        }
+    )
+
+    trade = client._trade_from_private_execution(
+        {
+            "execution": {
+                "id": "exec-1",
+                "tradeId": "trade-1",
+                "lastShares": "2",
+                "lastPx": {"value": "0.61", "currency": "USD"},
+                "type": "EXECUTION_TYPE_FILL",
+                "updateTime": "2026-04-20T12:34:56Z",
+                "order": {
+                    "id": "order-1",
+                    "marketSlug": "event-slug",
+                    "side": "ORDER_SIDE_BUY",
+                    "intent": "ORDER_INTENT_BUY_LONG",
+                },
+            }
+        }
+    )
+
+    assert trade is not None
+    assert trade.trade_id == "trade-1"
+    assert trade.order_id == "order-1"
+    assert trade.market_id == "15237"
+    assert trade.market_slug == "event-slug"
+    assert trade.token_type == TokenType.YES
+    assert trade.side == OrderSide.BUY
+    assert trade.price == 0.61
+    assert trade.size == 2.0
+    assert trade.timestamp == datetime(2026, 4, 20, 12, 34, 56)

@@ -56,6 +56,11 @@ class ArbConfig:
     mm_max_price: float = 0.90
     # Cooldown before re-emitting an MM signal for the same (market, token).
     mm_cooldown_seconds: float = 5.0
+    # Require MM opportunities to stay invalid briefly before canceling live
+    # quotes. This prevents a single noisy book update from tearing down a
+    # quote set that only rested for a few hundred milliseconds.
+    mm_invalidation_grace_seconds: float = 1.0
+    mm_invalidation_min_updates: int = 2
     mm_enabled: bool = True
     tick_size: float = 0.01
     
@@ -84,6 +89,8 @@ class OpportunityTiming:
     opportunity_type: str
     detected_at: datetime
     edge: float
+    invalid_since: Optional[datetime] = None
+    invalid_updates: int = 0
     expired_at: Optional[datetime] = None
     duration_ms: Optional[float] = None
     was_executed: bool = False
@@ -160,7 +167,7 @@ class ArbEngine:
         # Optional callback invoked when a tracked opportunity expires. Used to
         # cancel stale maker quotes immediately instead of waiting for the
         # execution timeout monitor.
-        self._expiry_callback: Optional[Callable[[str, str], None]] = None
+        self._expiry_callback: Optional[Callable[[str, str, str], None]] = None
 
         logger.info(f"ArbEngine initialized with min_edge={config.min_edge}, min_spread={config.min_spread}")
 
@@ -192,7 +199,7 @@ class ArbEngine:
         """
         self._position_probe = probe
 
-    def set_expiry_callback(self, callback: Callable[[str, str], None]) -> None:
+    def set_expiry_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """Register a callback invoked when an opportunity expires."""
         self._expiry_callback = callback
     
@@ -257,13 +264,36 @@ class ArbEngine:
             age_seconds = (now - timing.detected_at).total_seconds()
             if age_seconds > 10:
                 still_valid = False
+
+            is_mm_opportunity = timing.opportunity_type in {
+                OpportunityType.MM_BID.value,
+                OpportunityType.MM_ASK.value,
+            }
+            if is_mm_opportunity:
+                if still_valid:
+                    timing.invalid_since = None
+                    timing.invalid_updates = 0
+                else:
+                    if timing.invalid_since is None:
+                        timing.invalid_since = now
+                    timing.invalid_updates += 1
+                    invalid_age_seconds = (now - timing.invalid_since).total_seconds()
+                    if (
+                        invalid_age_seconds < self.config.mm_invalidation_grace_seconds
+                        or timing.invalid_updates < self.config.mm_invalidation_min_updates
+                    ):
+                        still_valid = True
             
             if not still_valid:
                 timing.mark_expired(executed=False)
                 self._record_opportunity_duration(timing)
                 if self._expiry_callback is not None:
                     try:
-                        self._expiry_callback(timing.market_id, timing.opportunity_type)
+                        self._expiry_callback(
+                            timing.market_id,
+                            timing.opportunity_type,
+                            timing.opportunity_id,
+                        )
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("expiry callback failed for %s: %s", timing.market_id, exc)
                 expired_keys.append(key)
@@ -726,6 +756,7 @@ class ArbEngine:
                 "price": our_bid,
                 "size": order_size,
                 "strategy_tag": "market_making",
+                "quote_group_id": opportunity.opportunity_id,
             },
             {
                 "token_type": token_type,
@@ -733,6 +764,7 @@ class ArbEngine:
                 "price": our_ask,
                 "size": order_size,
                 "strategy_tag": "market_making",
+                "quote_group_id": opportunity.opportunity_id,
             },
         ]
         

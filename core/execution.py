@@ -95,6 +95,7 @@ class ExecutionEngine:
         # Order tracking by market and strategy
         self._orders_by_market: dict[str, list[str]] = {}
         self._orders_by_strategy: dict[str, list[str]] = {}
+        self._cancel_in_flight: set[str] = set()
 
         # Markets whose orders the API has permanently rejected. We skip new
         # signals for them until this timestamp passes. Keeps the log readable
@@ -248,6 +249,7 @@ class ExecutionEngine:
                 price = order_spec["price"]
                 size = order_spec["size"]
                 strategy_tag = order_spec.get("strategy_tag", "")
+                quote_group_id = order_spec.get("quote_group_id", "")
                 
                 # Check slippage if enabled
                 if self.config.enable_slippage_check and signal.opportunity:
@@ -274,6 +276,7 @@ class ExecutionEngine:
                     price=price,
                     size=size,
                     strategy_tag=strategy_tag,
+                    quote_group_id=quote_group_id,
                 )
                 
                 if not self.risk_manager.check_order(proposed_order):
@@ -301,6 +304,7 @@ class ExecutionEngine:
                 )
                 
                 if order:
+                    order.quote_group_id = quote_group_id
                     self._track_order(order)
                     self.stats.orders_placed += 1
                     self.stats.total_notional += order.notional
@@ -311,7 +315,8 @@ class ExecutionEngine:
     
     async def _handle_cancel_orders(self, signal: Signal) -> None:
         """Handle a cancel_orders signal."""
-        for order_id in signal.cancel_order_ids:
+        order_ids = signal.cancel_order_ids or self._resolve_cancel_order_ids(signal)
+        for order_id in order_ids:
             try:
                 await self.cancel_order(order_id)
             except Exception as e:
@@ -472,8 +477,17 @@ class ExecutionEngine:
     
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order."""
+        if order_id in self._cancel_in_flight:
+            logger.debug("Cancel already in flight for %s", order_id)
+            return False
+
+        tracked_order = self._open_orders.get(order_id)
+        if tracked_order is None:
+            logger.debug("Skipping cancel for untracked order %s", order_id)
+            return False
+
+        self._cancel_in_flight.add(order_id)
         try:
-            tracked_order = self._open_orders.get(order_id)
             market_slug = None
             if tracked_order:
                 market_slug = tracked_order.market_slug or tracked_order.market_id
@@ -486,6 +500,8 @@ class ExecutionEngine:
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
             return False
+        finally:
+            self._cancel_in_flight.discard(order_id)
     
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
         """Cancel all open orders, optionally for a specific market."""
@@ -508,9 +524,21 @@ class ExecutionEngine:
         market_id: str,
         strategy_tag: Optional[str] = None,
         token_type: Optional[TokenType] = None,
+        quote_group_id: str = "",
         priority: int = 9,
     ) -> Optional[Signal]:
         """Create a cancel signal for currently open tracked orders."""
+        if quote_group_id:
+            return Signal(
+                signal_id=f"sig_cancel_{uuid.uuid4().hex[:12]}",
+                action="cancel_orders",
+                market_id=market_id,
+                cancel_strategy_tag=strategy_tag or "",
+                cancel_quote_group_id=quote_group_id,
+                cancel_token_type=token_type,
+                priority=priority,
+            )
+
         order_ids: list[str] = []
         for order in self.get_open_orders(market_id=market_id):
             if strategy_tag and order.strategy_tag != strategy_tag:
@@ -527,8 +555,23 @@ class ExecutionEngine:
             action="cancel_orders",
             market_id=market_id,
             cancel_order_ids=order_ids,
+            cancel_strategy_tag=strategy_tag or "",
+            cancel_token_type=token_type,
             priority=priority,
         )
+
+    def _resolve_cancel_order_ids(self, signal: Signal) -> list[str]:
+        """Resolve filtered cancel signals to the currently open order ids."""
+        order_ids: list[str] = []
+        for order in self.get_open_orders(market_id=signal.market_id):
+            if signal.cancel_strategy_tag and order.strategy_tag != signal.cancel_strategy_tag:
+                continue
+            if signal.cancel_token_type is not None and order.token_type != signal.cancel_token_type:
+                continue
+            if signal.cancel_quote_group_id and order.quote_group_id != signal.cancel_quote_group_id:
+                continue
+            order_ids.append(order.order_id)
+        return order_ids
     
     async def cancel_orders_by_strategy(self, strategy_tag: str) -> int:
         """Cancel all orders for a specific strategy."""

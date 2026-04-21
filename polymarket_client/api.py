@@ -792,6 +792,219 @@ class PolymarketClient(BasePolymarketClient):
                 self._runtime_stats["orderbook_rotations"] += 1
             await asyncio.sleep(rotation_delay)
 
+    @staticmethod
+    def _chunked(items: list[str], chunk_size: int) -> list[list[str]]:
+        """Split a list into fixed-size chunks."""
+        chunk_size = max(1, int(chunk_size or 1))
+        return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+    def _resolve_market_identifier(self, market_slug: str, market_id: Optional[str] = None) -> str:
+        """Resolve a websocket market slug back to the canonical market id."""
+        explicit_market_id = str(market_id or "").strip()
+        if explicit_market_id:
+            return explicit_market_id
+        cached = self._markets_by_slug.get(market_slug)
+        if cached is not None:
+            return cached.market_id
+        return market_slug
+
+    def _synthesize_no_book(self, yes_book: TokenOrderBook, no_book: TokenOrderBook) -> TokenOrderBook:
+        """Mirror YES quotes into the NO book when the exchange omits it."""
+        if no_book.bids.levels or no_book.asks.levels:
+            return no_book
+        return TokenOrderBook(
+            TokenType.NO,
+            OrderBookSide(
+                [
+                    PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size)
+                    for level in yes_book.asks.levels
+                ]
+            ),
+            OrderBookSide(
+                [
+                    PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size)
+                    for level in yes_book.bids.levels
+                ]
+            ),
+            synthetic=True,
+        )
+
+    def _orderbook_from_ws_payload(self, data: dict[str, Any]) -> Optional[tuple[str, OrderBook]]:
+        """Convert a markets websocket message into an OrderBook snapshot."""
+        market_slug = str(data.get("marketSlug") or data.get("market_slug") or data.get("slug") or "").strip()
+        if not market_slug:
+            return None
+        market_id = self._resolve_market_identifier(
+            market_slug,
+            data.get("marketId") or data.get("market_id"),
+        )
+
+        bids = self._parse_price_levels(data.get("bids"))
+        asks = self._parse_price_levels(data.get("offers") or data.get("asks"))
+        best_bid = data.get("bestBid") or data.get("best_bid")
+        best_ask = data.get("bestAsk") or data.get("best_ask")
+        if not bids and best_bid is not None:
+            bids = self._parse_price_levels([{"px": best_bid, "qty": data.get("bidDepth") or data.get("bid_depth") or 1}])
+        if not asks and best_ask is not None:
+            asks = self._parse_price_levels([{"px": best_ask, "qty": data.get("askDepth") or data.get("ask_depth") or 1}])
+
+        yes_book = TokenOrderBook(
+            token_type=TokenType.YES,
+            bids=OrderBookSide(levels=self._parse_price_levels(data.get("yes_bids")) or bids),
+            asks=OrderBookSide(levels=self._parse_price_levels(data.get("yes_asks")) or asks),
+        )
+        no_book = TokenOrderBook(
+            token_type=TokenType.NO,
+            bids=OrderBookSide(levels=self._parse_price_levels(data.get("no_bids"))),
+            asks=OrderBookSide(levels=self._parse_price_levels(data.get("no_asks"))),
+        )
+        no_book = self._synthesize_no_book(yes_book, no_book)
+        return market_id, OrderBook(
+            market_id=market_id,
+            yes=yes_book,
+            no=no_book,
+            timestamp=datetime.utcnow(),
+        )
+
+    def _build_market_ws_subscriptions(self, market_slugs: list[str]) -> list[dict[str, Any]]:
+        """Build documented camelCase subscription payloads for the markets websocket."""
+        messages: list[dict[str, Any]] = []
+        for index, chunk in enumerate(self._chunked(market_slugs, 100), start=1):
+            messages.append(
+                {
+                    "subscribe": {
+                        "requestId": f"mdl-{index}-{uuid.uuid4().hex[:8]}",
+                        "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA_LITE",
+                        "marketSlugs": chunk,
+                    }
+                }
+            )
+            messages.append(
+                {
+                    "subscribe": {
+                        "requestId": f"trade-{index}-{uuid.uuid4().hex[:8]}",
+                        "subscriptionType": "SUBSCRIPTION_TYPE_TRADE",
+                        "marketSlugs": chunk,
+                    }
+                }
+            )
+        return messages
+
+    def _build_private_ws_subscriptions(self) -> list[dict[str, Any]]:
+        """Build private websocket subscriptions for order, position, and balance updates."""
+        return [
+            {
+                "subscribe": {
+                    "requestId": f"order-{uuid.uuid4().hex[:8]}",
+                    "subscriptionType": "SUBSCRIPTION_TYPE_ORDER",
+                    "marketSlugs": [],
+                }
+            },
+            {
+                "subscribe": {
+                    "requestId": f"position-{uuid.uuid4().hex[:8]}",
+                    "subscriptionType": "SUBSCRIPTION_TYPE_POSITION",
+                    "marketSlugs": [],
+                }
+            },
+            {
+                "subscribe": {
+                    "requestId": f"balance-{uuid.uuid4().hex[:8]}",
+                    "subscriptionType": "SUBSCRIPTION_TYPE_ACCOUNT_BALANCE",
+                }
+            },
+        ]
+
+    def _trade_from_private_execution(self, update: dict[str, Any]) -> Optional[Trade]:
+        """Convert a private websocket execution update into a Trade."""
+        execution = update.get("execution") if isinstance(update, dict) else None
+        if not isinstance(execution, dict):
+            return None
+        execution_type = str(execution.get("type") or "").upper()
+        if "FILL" not in execution_type:
+            return None
+
+        order = execution.get("order") if isinstance(execution.get("order"), dict) else {}
+        market_slug = str(order.get("marketSlug") or order.get("market_slug") or "").strip()
+        market_id = self._resolve_market_identifier(
+            market_slug,
+            order.get("marketId") or order.get("market_id"),
+        )
+        intent = str(order.get("intent") or execution.get("intent") or "")
+        token_type = TokenType.NO if "SHORT" in intent else TokenType.YES
+        side = self._parse_side(order.get("side") or execution.get("side") or execution.get("direction"))
+        price = self._amount_value(execution.get("lastPx") or order.get("price"))
+        size = float(
+            execution.get("lastShares")
+            or execution.get("lastQty")
+            or execution.get("lastQuantity")
+            or execution.get("quantity")
+            or 0.0
+        )
+        trade_id = str(execution.get("tradeId") or execution.get("trade_id") or execution.get("id") or "").strip()
+        order_id = str(
+            order.get("id")
+            or order.get("orderId")
+            or order.get("order_id")
+            or execution.get("orderId")
+            or execution.get("order_id")
+            or ""
+        ).strip()
+        if not trade_id or not market_id or size <= 0 or price <= 0:
+            return None
+        timestamp = self._parse_timestamp(
+            execution.get("tradeTime"),
+            execution.get("updateTime"),
+            execution.get("transactTime"),
+            order.get("updateTime"),
+            order.get("createTime"),
+        )
+        return Trade(
+            trade_id=trade_id,
+            order_id=order_id,
+            market_id=market_id,
+            market_slug=market_slug,
+            token_type=token_type,
+            side=side,
+            price=price,
+            size=size,
+            fee=self._amount_value(execution.get("fee")),
+            timestamp=timestamp,
+        )
+
+    def _parse_private_ws_event(self, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Normalize private websocket payloads into a small event envelope."""
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("heartbeat") is not None:
+            return None
+
+        snapshot = payload.get("orderSubscriptionSnapshot") or payload.get("order_subscription_snapshot")
+        if isinstance(snapshot, dict):
+            return {"type": "order_snapshot", "data": snapshot}
+
+        update = payload.get("orderSubscriptionUpdate") or payload.get("order_subscription_update")
+        if isinstance(update, dict):
+            return {
+                "type": "order_update",
+                "data": update,
+                "trade": self._trade_from_private_execution(update),
+            }
+
+        position = payload.get("positionSubscription") or payload.get("position_subscription")
+        if isinstance(position, dict):
+            return {"type": "position_update", "data": position}
+
+        balances_snapshot = payload.get("accountBalancesSnapshot") or payload.get("account_balances_snapshot")
+        if isinstance(balances_snapshot, dict):
+            return {"type": "account_balance_snapshot", "data": balances_snapshot}
+
+        balances_update = payload.get("accountBalancesUpdate") or payload.get("account_balances_update")
+        if isinstance(balances_update, dict):
+            return {"type": "account_balance_update", "data": balances_update}
+
+        return None
+
     async def _stream_orderbooks_ws(
         self,
         market_slugs: list[str],
@@ -807,64 +1020,25 @@ class PolymarketClient(BasePolymarketClient):
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
-                    request_id = f"markets-{uuid.uuid4().hex[:10]}"
-                    subscribe_msg = {
-                        "subscribe": {
-                            # Use snake_case + numeric enum for broad compatibility.
-                            "request_id": request_id,
-                            "subscription_type": 1,
-                            "market_slugs": market_slugs,
-                        }
-                    }
-                    await ws.send(json.dumps(subscribe_msg))
+                    for message in self._build_market_ws_subscriptions(market_slugs):
+                        await ws.send(json.dumps(message))
                     while True:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=max(8.0, rotation_delay * 6))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=max(20.0, rotation_delay * 12))
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8", errors="ignore")
                         payload = json.loads(raw)
                         if payload.get("heartbeat") is not None:
                             continue
-                        data = (
-                            payload.get("marketData")
-                            or payload.get("marketDataLite")
-                            or payload.get("market_data_lite")
-                            or payload.get("market_data")
-                            or payload.get("market_subscription_snapshot")
-                        )
+                        data = payload.get("marketData") or payload.get("marketDataLite")
                         if not isinstance(data, dict):
                             continue
-                        market_slug = str(data.get("marketSlug") or data.get("market_slug") or data.get("slug") or "")
-                        if not market_slug:
+                        parsed = self._orderbook_from_ws_payload(data)
+                        if parsed is None:
                             continue
-                        market_id = slug_to_market_id.get(market_slug, market_slug)
-
-                        bids = self._parse_price_levels(data.get("bids"))
-                        asks = self._parse_price_levels(data.get("asks") or data.get("offers"))
-                        best_bid = data.get("bestBid")
-                        best_ask = data.get("bestAsk")
-                        if not bids and isinstance(best_bid, dict):
-                            bids = self._parse_price_levels([{"px": best_bid, "qty": data.get("bidDepth") or 1}])
-                        if not asks and isinstance(best_ask, dict):
-                            asks = self._parse_price_levels([{"px": best_ask, "qty": data.get("askDepth") or 1}])
-
-                        yes_book = TokenOrderBook(
-                            token_type=TokenType.YES,
-                            bids=OrderBookSide(levels=self._parse_price_levels(data.get("yes_bids")) or bids),
-                            asks=OrderBookSide(levels=self._parse_price_levels(data.get("yes_asks")) or asks),
-                        )
-                        no_book = TokenOrderBook(
-                            token_type=TokenType.NO,
-                            bids=OrderBookSide(levels=self._parse_price_levels(data.get("no_bids"))),
-                            asks=OrderBookSide(levels=self._parse_price_levels(data.get("no_asks"))),
-                        )
-                        orderbook = OrderBook(
-                            market_id=market_id,
-                            yes=yes_book,
-                            no=no_book,
-                            timestamp=datetime.utcnow(),
-                        )
+                        market_id, orderbook = parsed
+                        orderbook.market_id = slug_to_market_id.get(market_id, market_id)
                         self._runtime_stats["orderbook_updates_emitted"] += 1
-                        yield market_id, orderbook
+                        yield orderbook.market_id, orderbook
             except asyncio.CancelledError:
                 raise
             except ConnectionClosed:
@@ -907,6 +1081,37 @@ class PolymarketClient(BasePolymarketClient):
         # De-duplicate while preserving order.
         slugs = list(dict.fromkeys(slugs))
         return slugs, slug_to_market_id
+
+    async def stream_private_updates(self) -> AsyncIterator[dict[str, Any]]:
+        """Stream private order, position, and balance websocket updates."""
+        if self.dry_run or not self.key_id or not self.secret_key:
+            return
+        while True:
+            try:
+                headers = self._auth_headers("GET", "/v1/ws/private")
+                async with websockets.connect(
+                    self.private_ws_url,
+                    additional_headers=list(headers.items()),
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as ws:
+                    for message in self._build_private_ws_subscriptions():
+                        await ws.send(json.dumps(message))
+                    while True:
+                        raw = await ws.recv()
+                        if isinstance(raw, bytes):
+                            raw = raw.decode("utf-8", errors="ignore")
+                        payload = json.loads(raw)
+                        event = self._parse_private_ws_event(payload)
+                        if event is not None:
+                            yield event
+            except asyncio.CancelledError:
+                raise
+            except ConnectionClosed:
+                await asyncio.sleep(1.0)
+            except Exception as exc:
+                logger.warning("Private websocket stream failure: %s", exc)
+                await asyncio.sleep(1.0)
 
     async def stream_orderbook(
         self,

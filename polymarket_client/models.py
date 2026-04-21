@@ -210,6 +210,7 @@ class Order:
     price: float
     size: float
     market_slug: str = ""
+    quote_group_id: str = ""
     filled_size: float = 0.0
     status: OrderStatus = OrderStatus.PENDING
     
@@ -335,6 +336,9 @@ class Signal:
     opportunity: Optional[Opportunity] = None
     orders: list[dict] = field(default_factory=list)  # Desired order specs
     cancel_order_ids: list[str] = field(default_factory=list)
+    cancel_strategy_tag: str = ""
+    cancel_quote_group_id: str = ""
+    cancel_token_type: Optional[TokenType] = None
     priority: int = 0  # Higher = more urgent
     created_at: datetime = field(default_factory=datetime.utcnow)
     

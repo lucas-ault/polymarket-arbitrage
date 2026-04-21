@@ -221,7 +221,13 @@ class TestMarketMaking:
 
     def test_mm_expiry_callback_fires_when_market_making_edge_disappears(self, arb_engine: ArbEngine):
         expired = []
-        arb_engine.set_expiry_callback(lambda market_id, opportunity_type: expired.append((market_id, opportunity_type)))
+        arb_engine.config.mm_invalidation_grace_seconds = 0.0
+        arb_engine.config.mm_invalidation_min_updates = 1
+        arb_engine.set_expiry_callback(
+            lambda market_id, opportunity_type, opportunity_id: expired.append(
+                (market_id, opportunity_type, opportunity_id)
+            )
+        )
 
         wide_book = create_order_book(
             market_id="test_market",
@@ -241,7 +247,39 @@ class TestMarketMaking:
         )
         arb_engine._check_expired_opportunities("test_market", tight_book)
 
-        assert ("test_market", OpportunityType.MM_BID.value) in expired
+        assert expired
+        assert expired[0][0] == "test_market"
+        assert expired[0][1] == OpportunityType.MM_BID.value
+        assert expired[0][2].startswith("mm_yes_")
+
+    def test_mm_invalidation_hysteresis_prevents_immediate_expiry(self, arb_engine: ArbEngine):
+        expired = []
+        arb_engine.config.mm_invalidation_grace_seconds = 1.0
+        arb_engine.config.mm_invalidation_min_updates = 2
+        arb_engine.set_expiry_callback(
+            lambda market_id, opportunity_type, opportunity_id: expired.append(opportunity_id)
+        )
+
+        wide_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.45,
+            yes_ask=0.55,
+            no_bid=0.40,
+            no_ask=0.50,
+        )
+        arb_engine.analyze(create_market_state(wide_book))
+
+        tight_book = create_order_book(
+            market_id="test_market",
+            yes_bid=0.49,
+            yes_ask=0.51,
+            no_bid=0.49,
+            no_ask=0.51,
+        )
+        arb_engine._check_expired_opportunities("test_market", tight_book)
+
+        assert "test_market_mm_bid" in arb_engine._active_opportunities
+        assert expired == []
 
 
 class TestSignalGeneration:

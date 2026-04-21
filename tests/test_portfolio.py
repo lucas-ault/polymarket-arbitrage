@@ -295,5 +295,11 @@ class TestPortfolioSummary:
         assert summary["total_exposure"] == 42.0
         assert summary["total_trades"] == 8
         assert summary["win_rate"] == 0.625
-        assert summary["exchange_pnl"]["total_proxy"] == 7.5
+        assert summary["pnl"]["realized_pnl"] == 5.0
+        assert summary["pnl"]["unrealized_pnl"] == 2.5
+        assert summary["pnl"]["total_pnl"] == 7.5
+        assert summary["local_pnl"]["total_pnl"] == 0.0
+        assert summary["exchange_pnl"]["realized_pnl"] == 5.0
+        assert summary["exchange_pnl"]["unrealized_pnl"] == 2.5
+        assert summary["exchange_pnl"]["total_pnl"] == 7.5
 

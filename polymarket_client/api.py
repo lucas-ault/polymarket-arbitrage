@@ -1311,7 +1311,9 @@ class PolymarketClient(BasePolymarketClient):
                 markets_traded += 1
                 positions_count += 1
                 total_realized += self._amount_value(item.get("realized"))
-                positions_cash_value_total += self._amount_value(item.get("cashValue"))
+                cash_value = self._amount_value(item.get("cashValue"))
+                positions_cash_value_total += cash_value
+                total_unrealized += cash_value
 
             activities = self._extract_items(activities_payload, ("activities", "data", "results"))
             total_trades = 0

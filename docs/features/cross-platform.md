@@ -50,6 +50,7 @@ When `run_with_dashboard.py` starts with cross-platform enabled:
 4. it waits for some Polymarket markets to exist
 5. it calls `MarketMatcher.find_matches()` in a background thread flow
 6. it writes progress and matched pairs into dashboard state
+7. it can warm-load/save matched pairs through optional Redis cache (`pmarb:xplat:matches:v1` by default)
 
 This is real and implemented.
 
@@ -109,7 +110,7 @@ Relevant config keys include:
 - `mode.min_match_similarity`
 - `api.kalshi_api_url`
 
-Important note: `mode.min_match_similarity` is defined in config, but the current runtime creates `MarketMatcher()` with its default internal threshold rather than forwarding the config value.
+`mode.min_match_similarity` is forwarded into matcher initialization and also stored in cache metadata to avoid reusing mismatched-threshold snapshots.
 
 ## Unified Order Book Conversion
 Kalshi only returns bid ladders. `KalshiOrderBook.to_unified_orderbook()` derives asks using the binary-market complement relationship:

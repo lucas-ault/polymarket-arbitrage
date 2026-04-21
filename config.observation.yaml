@@ -72,3 +72,13 @@ monitoring:
   orderbook_request_delay_seconds: 0.0
   orderbook_batch_delay_seconds: 0.15
   orderbook_rotation_delay_seconds: 1.25
+
+cache:
+  enabled: false
+  backend: "redis"
+  redis_url: "redis://localhost:6379/0"
+  key_prefix: "pmarb"
+  connect_timeout_seconds: 1.0
+  op_timeout_seconds: 0.5
+  markets_ttl_seconds: 900
+  matches_ttl_seconds: 3600

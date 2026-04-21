@@ -111,6 +111,19 @@ class MonitoringConfig:
 
 
 @dataclass
+class CacheConfig:
+    """Optional cache configuration."""
+    enabled: bool = False
+    backend: str = "redis"
+    redis_url: str = "redis://localhost:6379/0"
+    key_prefix: str = "pmarb"
+    connect_timeout_seconds: float = 1.0
+    op_timeout_seconds: float = 0.5
+    markets_ttl_seconds: int = 900
+    matches_ttl_seconds: int = 3600
+
+
+@dataclass
 class BotConfig:
     """Complete bot configuration."""
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -119,6 +132,7 @@ class BotConfig:
     mode: ModeConfig = field(default_factory=ModeConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
     
     @property
     def is_dry_run(self) -> bool:
@@ -168,6 +182,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     mode_data = raw_config.get("mode", {})
     logging_data = raw_config.get("logging", {})
     monitoring_data = raw_config.get("monitoring", {})
+    cache_data = raw_config.get("cache", {})
     
     # Handle environment variable overrides
     api_data = _apply_env_overrides(api_data, {
@@ -176,6 +191,17 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "passphrase": "POLYMARKET_PASSPHRASE",
         "private_key": "POLYMARKET_PRIVATE_KEY",
     })
+    cache_data = _apply_env_overrides(cache_data, {
+        "enabled": "CACHE_ENABLED",
+        "backend": "CACHE_BACKEND",
+        "redis_url": "REDIS_URL",
+        "key_prefix": "CACHE_KEY_PREFIX",
+        "connect_timeout_seconds": "CACHE_CONNECT_TIMEOUT_SECONDS",
+        "op_timeout_seconds": "CACHE_OP_TIMEOUT_SECONDS",
+        "markets_ttl_seconds": "CACHE_MARKETS_TTL_SECONDS",
+        "matches_ttl_seconds": "CACHE_MATCHES_TTL_SECONDS",
+    })
+    cache_data = _coerce_cache_types(cache_data)
     
     # Build config objects
     config = BotConfig(
@@ -185,6 +211,7 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         mode=_build_dataclass(ModeConfig, mode_data),
         logging=_build_dataclass(LoggingConfig, logging_data),
         monitoring=_build_dataclass(MonitoringConfig, monitoring_data),
+        cache=_build_dataclass(CacheConfig, cache_data),
     )
     
     # Validate
@@ -210,6 +237,32 @@ def _build_dataclass(cls, data: dict):
     field_names = {f.name for f in dataclasses.fields(cls)}
     filtered_data = {k: v for k, v in data.items() if k in field_names}
     return cls(**filtered_data)
+
+
+def _coerce_cache_types(cache_data: dict) -> dict:
+    """Coerce env-overridden cache values to expected types."""
+    result = cache_data.copy()
+    
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+    
+    if "enabled" in result:
+        result["enabled"] = _to_bool(result["enabled"])
+    
+    int_fields = ("markets_ttl_seconds", "matches_ttl_seconds")
+    float_fields = ("connect_timeout_seconds", "op_timeout_seconds")
+    for key in int_fields:
+        if key in result and result[key] != "":
+            result[key] = int(result[key])
+    for key in float_fields:
+        if key in result and result[key] != "":
+            result[key] = float(result[key])
+    
+    return result
 
 
 def _validate_config(config: BotConfig) -> None:
@@ -256,6 +309,20 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("monitoring.orderbook_request_batch_size must be positive")
     if config.monitoring.orderbook_fetch_concurrency <= 0:
         errors.append("monitoring.orderbook_fetch_concurrency must be positive")
+    
+    # Cache validation
+    if config.cache.backend.lower() not in {"redis"}:
+        errors.append("cache.backend must be 'redis'")
+    if config.cache.connect_timeout_seconds <= 0:
+        errors.append("cache.connect_timeout_seconds must be positive")
+    if config.cache.op_timeout_seconds <= 0:
+        errors.append("cache.op_timeout_seconds must be positive")
+    if config.cache.markets_ttl_seconds <= 0:
+        errors.append("cache.markets_ttl_seconds must be positive")
+    if config.cache.matches_ttl_seconds <= 0:
+        errors.append("cache.matches_ttl_seconds must be positive")
+    if not config.cache.key_prefix:
+        errors.append("cache.key_prefix must not be empty")
     
     # Live mode checks
     if config.is_live:

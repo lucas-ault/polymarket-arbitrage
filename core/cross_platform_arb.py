@@ -577,6 +577,46 @@ class MarketMatcher:
     def get_cached_pairs(self) -> list[MarketPair]:
         """Get all cached market pairs."""
         return list(self._matched_pairs.values())
+    
+    def export_cached_pairs(self) -> list[dict]:
+        """Serialize cached pairs for persistence layers."""
+        return [
+            {
+                "polymarket_id": pair.polymarket_id,
+                "kalshi_ticker": pair.kalshi_ticker,
+                "polymarket_question": pair.polymarket_question,
+                "kalshi_title": pair.kalshi_title,
+                "similarity_score": pair.similarity_score,
+                "category": pair.category,
+                "matched_at": pair.matched_at.isoformat(),
+            }
+            for pair in self.get_cached_pairs()
+        ]
+    
+    def import_cached_pairs(self, serialized_pairs: list[dict]) -> int:
+        """Load persisted pairs back into matcher cache."""
+        loaded = 0
+        for raw in serialized_pairs:
+            try:
+                pair = MarketPair(
+                    polymarket_id=str(raw["polymarket_id"]),
+                    kalshi_ticker=str(raw["kalshi_ticker"]),
+                    polymarket_question=str(raw["polymarket_question"]),
+                    kalshi_title=str(raw["kalshi_title"]),
+                    similarity_score=float(raw["similarity_score"]),
+                    category=str(raw.get("category", "")),
+                )
+                matched_at = raw.get("matched_at")
+                if matched_at:
+                    try:
+                        pair.matched_at = datetime.fromisoformat(matched_at)
+                    except Exception:
+                        pass
+                self._matched_pairs[pair.pair_id] = pair
+                loaded += 1
+            except Exception:
+                continue
+        return loaded
 
 
 class CrossPlatformArbEngine:

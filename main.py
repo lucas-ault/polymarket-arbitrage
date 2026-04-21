@@ -28,6 +28,7 @@ from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging, performance_logger
+from utils.redis_cache import RedisCacheConfig, create_cache_store
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ class TradingBot:
         self.execution_engine: Optional[ExecutionEngine] = None
         self.risk_manager: Optional[RiskManager] = None
         self.portfolio: Optional[Portfolio] = None
+        self.cache_store = None
         
         # Statistics
         self._start_time: Optional[datetime] = None
@@ -70,6 +72,17 @@ class TradingBot:
         self._running = True
         
         # Initialize API client
+        cache_config = RedisCacheConfig(
+            enabled=self.config.cache.enabled,
+            backend=self.config.cache.backend,
+            redis_url=self.config.cache.redis_url,
+            key_prefix=self.config.cache.key_prefix,
+            connect_timeout_seconds=self.config.cache.connect_timeout_seconds,
+            op_timeout_seconds=self.config.cache.op_timeout_seconds,
+            markets_ttl_seconds=self.config.cache.markets_ttl_seconds,
+            matches_ttl_seconds=self.config.cache.matches_ttl_seconds,
+        )
+        self.cache_store = await create_cache_store(cache_config)
         self.client = PolymarketClient(
             rest_url=self.config.api.polymarket_rest_url,
             ws_url=self.config.api.polymarket_ws_url,
@@ -81,6 +94,8 @@ class TradingBot:
             max_retries=self.config.api.max_retries,
             retry_delay=self.config.api.retry_delay_seconds,
             dry_run=self.config.is_dry_run,
+            cache_store=self.cache_store,
+            markets_cache_ttl_seconds=self.config.cache.markets_ttl_seconds,
         )
         await self.client.connect()
         

@@ -17,6 +17,7 @@ import sys
 from utils.config_loader import load_config
 from utils.logging_utils import setup_logging
 from polymarket_client import PolymarketClient
+from utils.redis_cache import RedisCacheConfig, create_cache_store
 
 
 async def test_connection(config_path: str = "config.yaml"):
@@ -51,6 +52,27 @@ async def test_connection(config_path: str = "config.yaml"):
     print()
     print("📡 Testing API connection...")
     
+    # Optional cache connectivity check
+    if getattr(config, "cache", None) and config.cache.enabled:
+        print()
+        print("🧠 Testing optional Redis cache...")
+        redis_config = RedisCacheConfig(
+            enabled=config.cache.enabled,
+            backend=config.cache.backend,
+            redis_url=config.cache.redis_url,
+            key_prefix=config.cache.key_prefix,
+            connect_timeout_seconds=config.cache.connect_timeout_seconds,
+            op_timeout_seconds=config.cache.op_timeout_seconds,
+            markets_ttl_seconds=config.cache.markets_ttl_seconds,
+            matches_ttl_seconds=config.cache.matches_ttl_seconds,
+        )
+        cache_store = await create_cache_store(redis_config)
+        if cache_store.is_available():
+            print("✅ Redis cache connected")
+        else:
+            print("⚠️  Redis unavailable - continuing with fallback behavior")
+        await cache_store.close()
+    
     # Create client
     client = PolymarketClient(
         rest_url=config.api.polymarket_rest_url,
@@ -61,6 +83,7 @@ async def test_connection(config_path: str = "config.yaml"):
         private_key=config.api.private_key,
         timeout=config.api.timeout_seconds,
         dry_run=config.is_dry_run,
+        markets_cache_ttl_seconds=getattr(config.cache, "markets_ttl_seconds", 900),
     )
     
     try:

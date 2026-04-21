@@ -205,6 +205,14 @@ class DashboardIntegration:
                 "last_rotation_duration_ms": client_stats["last_rotation_duration_ms"],
                 "avg_rotation_duration_ms": client_stats["avg_rotation_duration_ms"],
                 "max_rotation_duration_ms": client_stats["max_rotation_duration_ms"],
+                "cache_connected": bool(client_stats.get("cache_connected", 0)),
+                "cache_reads": int(client_stats.get("cache_reads", 0)),
+                "cache_writes": int(client_stats.get("cache_writes", 0)),
+                "cache_hits": int(client_stats.get("cache_hits", 0)),
+                "cache_misses": int(client_stats.get("cache_misses", 0)),
+                "cache_errors": int(client_stats.get("cache_errors", 0)),
+                "cache_last_read_ms": client_stats.get("cache_last_read_ms", 0.0),
+                "cache_last_write_ms": client_stats.get("cache_last_write_ms", 0.0),
             }
         
         self._loop_count += 1

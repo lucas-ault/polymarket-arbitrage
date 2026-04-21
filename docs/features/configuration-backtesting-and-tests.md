@@ -24,6 +24,7 @@ This document covers how runtime settings enter the system, how backtesting work
 - `ModeConfig`
 - `LoggingConfig`
 - `MonitoringConfig`
+- `CacheConfig`
 - `BotConfig`
 
 `load_config()`:
@@ -41,6 +42,14 @@ Supported env vars:
 - `POLYMARKET_API_SECRET`
 - `POLYMARKET_PASSPHRASE`
 - `POLYMARKET_PRIVATE_KEY`
+- `CACHE_ENABLED`
+- `CACHE_BACKEND`
+- `REDIS_URL`
+- `CACHE_KEY_PREFIX`
+- `CACHE_CONNECT_TIMEOUT_SECONDS`
+- `CACHE_OP_TIMEOUT_SECONDS`
+- `CACHE_MARKETS_TTL_SECONDS`
+- `CACHE_MATCHES_TTL_SECONDS`
 
 These override the YAML values for the matching keys.
 
@@ -53,6 +62,7 @@ The loader validates:
 - non-negative daily loss
 - drawdown range
 - valid trading mode
+- valid cache backend and positive cache timeout/TTL values
 
 In live mode it also checks that:
 
@@ -95,6 +105,12 @@ Contains intended log file and rotation settings.
 
 ### `monitoring`
 Contains snapshot/heartbeat/performance flags.
+
+### `cache`
+Contains optional Redis warm-cache controls for:
+
+- Polymarket active market discovery snapshots
+- Cross-platform matched pair snapshots
 
 ## Config Keys With Incomplete Runtime Wiring
 These config values exist but are not fully consumed by the runtime entrypoints:
@@ -164,6 +180,7 @@ Checks:
 - config loading
 - market fetch
 - optional authenticated position retrieval
+- optional Redis cache availability check when cache is enabled
 
 It now defaults to `config.yaml`.
 

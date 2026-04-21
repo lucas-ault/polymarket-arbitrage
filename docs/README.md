@@ -15,6 +15,7 @@ This directory documents the repository as it exists in code today.
 - `features/dashboard.md`: FastAPI dashboard, API routes, WebSocket state, UI integration
 - `features/cross-platform.md`: Kalshi integration, matching, cross-platform arb logic, current gaps
 - `features/configuration-backtesting-and-tests.md`: config loading, env overrides, backtesting, tests, smoke scripts
+- `features/redis-cache.md`: optional Redis warm cache behavior, keys, fallbacks, and validation
 
 ## Reading Order
 For a new human reader:

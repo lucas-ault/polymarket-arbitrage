@@ -32,9 +32,13 @@ from polymarket_client.models import (
     TokenType,
     Trade,
 )
+from utils.cache_store import CacheStore, NoopCacheStore
 
 
 logger = logging.getLogger(__name__)
+
+MARKETS_CACHE_KEY = "pm:active_markets:v1"
+MARKETS_CACHE_SCHEMA_VERSION = 1
 
 
 class BasePolymarketClient(ABC):
@@ -116,6 +120,8 @@ class PolymarketClient(BasePolymarketClient):
         max_retries: int = 3,
         retry_delay: float = 1.0,
         dry_run: bool = True,
+        cache_store: Optional[CacheStore] = None,
+        markets_cache_ttl_seconds: int = 900,
     ):
         self.rest_url = rest_url.rstrip("/")
         self.ws_url = ws_url
@@ -128,6 +134,8 @@ class PolymarketClient(BasePolymarketClient):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.dry_run = dry_run
+        self.cache_store = cache_store or NoopCacheStore()
+        self.markets_cache_ttl_seconds = max(1, markets_cache_ttl_seconds)
         
         # HTTP client
         self._http_client: Optional[httpx.AsyncClient] = None
@@ -157,7 +165,11 @@ class PolymarketClient(BasePolymarketClient):
             "active_batch_size": 0.0,
             "markets_per_request_batch": 0.0,
             "request_concurrency": 0.0,
+            "cache_markets_hit": 0.0,
+            "cache_markets_miss": 0.0,
+            "cache_markets_writes": 0.0,
         }
+        self._markets_refresh_task: Optional[asyncio.Task] = None
         
     async def __aenter__(self) -> "PolymarketClient":
         await self.connect()
@@ -168,6 +180,7 @@ class PolymarketClient(BasePolymarketClient):
     
     async def connect(self) -> None:
         """Initialize HTTP client."""
+        await self.cache_store.connect()
         self._http_client = httpx.AsyncClient(
             timeout=self.timeout,
             headers=self._get_headers(),
@@ -176,13 +189,136 @@ class PolymarketClient(BasePolymarketClient):
     
     async def disconnect(self) -> None:
         """Close connections."""
+        if self._markets_refresh_task:
+            self._markets_refresh_task.cancel()
+            try:
+                await self._markets_refresh_task
+            except asyncio.CancelledError:
+                pass
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
         if self._ws_connection:
             await self._ws_connection.close()
             self._ws_connection = None
+        await self.cache_store.close()
         logger.info("Polymarket client disconnected")
+
+    async def _hydrate_markets_cache(self) -> bool:
+        """Load market snapshot from external cache, if available."""
+        payload = await self.cache_store.get_json(MARKETS_CACHE_KEY)
+        if not payload:
+            self._runtime_stats["cache_markets_miss"] += 1
+            return False
+        if payload.get("schema_version") != MARKETS_CACHE_SCHEMA_VERSION:
+            self._runtime_stats["cache_markets_miss"] += 1
+            return False
+        markets = payload.get("markets", [])
+        loaded = 0
+        for item in markets:
+            market = self._parse_market(item)
+            if market and market.yes_token_id and market.no_token_id:
+                self._markets_cache[market.market_id] = market
+                loaded += 1
+        if loaded == 0:
+            self._runtime_stats["cache_markets_miss"] += 1
+            return False
+        self._runtime_stats["cache_markets_hit"] += 1
+        logger.info("Hydrated %s markets from cache", loaded)
+        return True
+
+    async def _persist_markets_cache(self, raw_markets: list[dict[str, Any]]) -> None:
+        """Persist raw market payload for warm startup."""
+        payload = {
+            "schema_version": MARKETS_CACHE_SCHEMA_VERSION,
+            "cached_at": datetime.utcnow().isoformat(),
+            "market_count": len(raw_markets),
+            "markets": raw_markets,
+        }
+        stored = await self.cache_store.set_json(
+            MARKETS_CACHE_KEY,
+            payload,
+            ttl_seconds=self.markets_cache_ttl_seconds,
+        )
+        if stored:
+            self._runtime_stats["cache_markets_writes"] += 1
+
+    def _can_serve_cached_markets(self, params: dict[str, Any]) -> bool:
+        """Return True when filters are compatible with cached snapshot usage."""
+        if "limit" in params or "offset" in params:
+            return False
+        if params.get("order", "volume24hr") != "volume24hr":
+            return False
+        if str(params.get("ascending", "false")).lower() != "false":
+            return False
+        if params.get("closed", "false") != "false":
+            return False
+        return True
+
+    async def _fetch_markets_from_api(self, params: dict[str, Any]) -> tuple[list[Market], list[dict[str, Any]], int]:
+        """Fetch markets via paginated Gamma API calls."""
+        all_markets: list[Market] = []
+        all_raw_markets: list[dict[str, Any]] = []
+        offset = 0
+        limit = 100
+        max_markets = 5000
+        discovery_batches = 0
+
+        while True:
+            params["limit"] = limit
+            params["offset"] = offset
+
+            data = await self._request(
+                "GET",
+                "/markets",
+                params=params,
+                base_url=self.gamma_url,
+            )
+            if not data:
+                break
+
+            discovery_batches += 1
+            all_raw_markets.extend(data)
+            batch_valid = 0
+            for item in data:
+                market = self._parse_market(item)
+                if market and market.yes_token_id and market.no_token_id:
+                    all_markets.append(market)
+                    self._markets_cache[market.market_id] = market
+                    batch_valid += 1
+
+            logger.info(
+                "Fetched batch: offset=%s, got %s markets (%s valid)",
+                offset,
+                len(data),
+                batch_valid,
+            )
+
+            if len(data) < limit:
+                break
+            offset += limit
+            await asyncio.sleep(0.15)
+            if len(all_markets) >= max_markets:
+                logger.info("Reached %s market cap", max_markets)
+                break
+
+        return all_markets, all_raw_markets, discovery_batches
+
+    def _schedule_markets_refresh(self, params: dict[str, Any]) -> None:
+        """Refresh cached market list asynchronously without blocking startup."""
+        if self._markets_refresh_task and not self._markets_refresh_task.done():
+            return
+
+        async def _refresh() -> None:
+            try:
+                fresh_markets, raw_markets, _ = await self._fetch_markets_from_api(params.copy())
+                if raw_markets:
+                    await self._persist_markets_cache(raw_markets)
+                logger.info("Background market refresh complete (%s markets)", len(fresh_markets))
+            except Exception as exc:
+                logger.warning("Background market refresh failed: %s", exc)
+
+        self._markets_refresh_task = asyncio.create_task(_refresh(), name="markets_refresh")
     
     def _get_headers(self) -> dict[str, str]:
         """Get authentication headers."""
@@ -261,60 +397,32 @@ class PolymarketClient(BasePolymarketClient):
             params.setdefault("order", "volume24hr")
             params.setdefault("ascending", "false")
             
-            all_markets = []
-            offset = 0
-            limit = 100  # Gamma API max per request
-            max_markets = 5000  # Get up to 5000 markets!
-            discovery_batches = 0
+            cache_loaded = await self._hydrate_markets_cache()
+            if cache_loaded and self._can_serve_cached_markets(params):
+                cached_markets = [
+                    market
+                    for market in self._markets_cache.values()
+                    if market.active and not market.closed and market.yes_token_id and market.no_token_id
+                ]
+                cached_markets.sort(key=lambda m: m.volume_24h, reverse=True)
+                self._schedule_markets_refresh(params)
+                logger.info("Serving %s markets from cache (refreshing in background)", len(cached_markets))
+                self._runtime_stats["markets_discovered_valid"] = float(len(cached_markets))
+                self._runtime_stats["market_discovery_duration_ms"] = (
+                    time.perf_counter() - discovery_started_at
+                ) * 1000
+                return cached_markets[:5000]
             
             logger.info("Fetching ALL available markets from Polymarket...")
-            
-            # Paginate to get all markets
-            while True:
-                params["limit"] = limit
-                params["offset"] = offset
-                
-                data = await self._request(
-                    "GET", 
-                    "/markets",
-                    params=params,
-                    base_url=self.gamma_url,
-                )
-                
-                if not data:
-                    break
-                discovery_batches += 1
-                
-                batch_valid = 0
-                for item in data:
-                    market = self._parse_market(item)
-                    if market and market.yes_token_id and market.no_token_id:
-                        all_markets.append(market)
-                        # Cache the market for later use
-                        self._markets_cache[market.market_id] = market
-                        batch_valid += 1
-                
-                logger.info(f"Fetched batch: offset={offset}, got {len(data)} markets ({batch_valid} valid)")
-                
-                if len(data) < limit:
-                    # No more pages
-                    break
-                    
-                offset += limit
-                
-                # Rate limiting - don't hammer the API
-                await asyncio.sleep(0.15)
-                
-                # Safety cap
-                if len(all_markets) >= max_markets:
-                    logger.info(f"Reached {max_markets} market cap")
-                    break
+            all_markets, all_raw_markets, discovery_batches = await self._fetch_markets_from_api(params)
             
             self._runtime_stats["market_discovery_batches"] = float(discovery_batches)
             self._runtime_stats["markets_discovered_valid"] = float(len(all_markets))
             self._runtime_stats["market_discovery_duration_ms"] = (
                 time.perf_counter() - discovery_started_at
             ) * 1000
+            if all_raw_markets:
+                await self._persist_markets_cache(all_raw_markets)
             logger.info(f"=== TOTAL: {len(all_markets)} active markets with valid tokens ===")
             return all_markets
             
@@ -1000,7 +1108,19 @@ class PolymarketClient(BasePolymarketClient):
     
     def get_runtime_stats(self) -> dict[str, float]:
         """Return client-level runtime metrics for observability."""
-        return self._runtime_stats.copy()
+        stats = self._runtime_stats.copy()
+        cache_stats = self.cache_store.stats
+        stats.update({
+            "cache_reads": float(cache_stats.reads),
+            "cache_writes": float(cache_stats.writes),
+            "cache_hits": float(cache_stats.hits),
+            "cache_misses": float(cache_stats.misses),
+            "cache_errors": float(cache_stats.errors),
+            "cache_last_read_ms": cache_stats.last_read_ms,
+            "cache_last_write_ms": cache_stats.last_write_ms,
+            "cache_connected": 1.0 if cache_stats.connected else 0.0,
+        })
+        return stats
     
     def simulate_fill(self, order_id: str, fill_size: Optional[float] = None) -> Optional[Trade]:
         """

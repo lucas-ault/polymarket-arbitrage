@@ -34,12 +34,16 @@ client.list_markets({"active": True})
 
 `PolymarketClient.list_markets()` then:
 
+- attempts to hydrate from optional Redis cache first (`pmarb:pm:active_markets:v1` by default)
 - pages through Gamma `/markets`
 - keeps only markets with valid YES and NO token IDs
 - caches those markets in `_markets_cache`
+- writes the latest normalized snapshot back to Redis (when enabled)
 - returns up to about 5000 markets
 
 If specific market IDs are supplied, `DataFeed` instead calls `client.get_market()` one-by-one.
+
+When a warm cache snapshot is available, startup can serve discovered markets immediately and refresh discovery from the API in a background task.
 
 ## Order Book Ingestion
 ### Real mode

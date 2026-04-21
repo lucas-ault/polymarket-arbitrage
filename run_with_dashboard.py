@@ -34,11 +34,14 @@ from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine, MarketMatcher
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging
+from utils.redis_cache import RedisCacheConfig, create_cache_store
 from dashboard.server import app, dashboard_state
 from dashboard.integration import DashboardIntegration
 
 
 logger = logging.getLogger(__name__)
+MATCHES_CACHE_KEY = "xplat:matches:v1"
+MATCHES_CACHE_SCHEMA_VERSION = 1
 
 
 class TradingBotWithDashboard:
@@ -58,6 +61,7 @@ class TradingBotWithDashboard:
         self.risk_manager = None
         self.portfolio = None
         self.dashboard_integration = None
+        self.cache_store = None
         
         # Components - Kalshi (cross-platform)
         self.kalshi_client = None
@@ -92,6 +96,17 @@ class TradingBotWithDashboard:
         self._running = True
         
         # Initialize Polymarket API client
+        cache_config = RedisCacheConfig(
+            enabled=self.config.cache.enabled,
+            backend=self.config.cache.backend,
+            redis_url=self.config.cache.redis_url,
+            key_prefix=self.config.cache.key_prefix,
+            connect_timeout_seconds=self.config.cache.connect_timeout_seconds,
+            op_timeout_seconds=self.config.cache.op_timeout_seconds,
+            markets_ttl_seconds=self.config.cache.markets_ttl_seconds,
+            matches_ttl_seconds=self.config.cache.matches_ttl_seconds,
+        )
+        self.cache_store = await create_cache_store(cache_config)
         self.client = PolymarketClient(
             rest_url=self.config.api.polymarket_rest_url,
             ws_url=self.config.api.polymarket_ws_url,
@@ -104,6 +119,8 @@ class TradingBotWithDashboard:
             max_retries=self.config.api.max_retries,
             retry_delay=self.config.api.retry_delay_seconds,
             dry_run=self.config.is_dry_run,
+            cache_store=self.cache_store,
+            markets_cache_ttl_seconds=self.config.cache.markets_ttl_seconds,
         )
         await self.client.connect()
         
@@ -346,6 +363,7 @@ class TradingBotWithDashboard:
                 
                 # Set initial status
                 dashboard_state.cross_platform["matching_status"] = "starting"
+                await self._load_cached_matches()
                 start_delay = getattr(self.config.mode, "cross_platform_match_start_delay_seconds", 0.0)
                 if start_delay > 0:
                     await asyncio.sleep(start_delay)
@@ -417,6 +435,7 @@ class TradingBotWithDashboard:
             dashboard_state.cross_platform["matching_duration_ms"] = (
                 time.perf_counter() - matching_started_at
             ) * 1000
+            await self._persist_cached_matches()
             
             logger.info(f"✓ Matching complete! Found {len(self._matched_pairs)} pairs")
             
@@ -437,6 +456,55 @@ class TradingBotWithDashboard:
             import traceback
             traceback.print_exc()
             dashboard_state.cross_platform["matching_status"] = "error"
+
+    async def _load_cached_matches(self) -> None:
+        """Load previously cached match results to speed up dashboard warm-up."""
+        if not self.cache_store or not self.cache_store.is_available():
+            return
+        payload = await self.cache_store.get_json(MATCHES_CACHE_KEY)
+        if not payload or payload.get("schema_version") != MATCHES_CACHE_SCHEMA_VERSION:
+            return
+        if float(payload.get("min_similarity", self.config.mode.min_match_similarity)) != float(
+            self.config.mode.min_match_similarity
+        ):
+            return
+        try:
+            loaded = self.market_matcher.import_cached_pairs(payload.get("pairs", []))
+        except Exception as exc:
+            logger.warning("Failed to import cached matches: %s", exc)
+            return
+        if loaded == 0:
+            return
+        self._matched_pairs = self.market_matcher.get_cached_pairs()
+        dashboard_state.cross_platform["matched_pairs"] = loaded
+        dashboard_state.cross_platform["matching_status"] = "cached"
+        dashboard_state.cross_platform["matched_pairs_data"] = [
+            {
+                "poly_question": pair.polymarket_question,
+                "kalshi_title": pair.kalshi_title,
+                "similarity": pair.similarity_score,
+                "category": pair.category,
+            }
+            for pair in self._matched_pairs[:50]
+        ]
+        logger.info("Loaded %s cached market matches", loaded)
+
+    async def _persist_cached_matches(self) -> None:
+        """Persist latest match results for warm starts."""
+        if not self.cache_store or not self.cache_store.is_available():
+            return
+        payload = {
+            "schema_version": MATCHES_CACHE_SCHEMA_VERSION,
+            "cached_at": datetime.utcnow().isoformat(),
+            "pair_count": len(self._matched_pairs),
+            "min_similarity": self.config.mode.min_match_similarity,
+            "pairs": self.market_matcher.export_cached_pairs(),
+        }
+        await self.cache_store.set_json(
+            MATCHES_CACHE_KEY,
+            payload,
+            ttl_seconds=self.config.cache.matches_ttl_seconds,
+        )
     
     async def stop(self) -> None:
         """Stop everything gracefully."""

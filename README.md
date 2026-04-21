@@ -145,6 +145,15 @@ For full observation mode (dashboard + real market data + auto-discovery), use:
 python run_with_dashboard.py -c config.observation.yaml
 ```
 
+Optional Redis warm cache (disabled by default):
+
+```yaml
+cache:
+  enabled: true
+  backend: "redis"
+  redis_url: "redis://localhost:6379/0"
+```
+
 ### 3. Run
 Bot only:
 
@@ -200,6 +209,7 @@ Important implementation notes:
 - `monitoring.heartbeat_interval` is defined but not used in the runtime loop
 - real-data feed tuning now comes from `monitoring.orderbook_*` fields (batch size, concurrency, and rotation delays)
 - dashboard payload size is intentionally capped for `/ws` and `/api/state`; use `/api/markets` for full market snapshots
+- optional Redis cache can warm-start Polymarket discovery and cross-platform market matching; if Redis is unavailable, runtime falls back safely to existing in-memory/API behavior
 
 ## Dashboard
 The dashboard exposes:
@@ -257,6 +267,7 @@ Detailed docs live in `docs/`:
 - `docs/features/dashboard.md`
 - `docs/features/cross-platform.md`
 - `docs/features/configuration-backtesting-and-tests.md`
+- `docs/features/redis-cache.md`
 
 ## Known Limitations
 - The main "live" Polymarket order book stream is polling-based and rotates through market batches, so updates are not truly real-time across all discovered markets.

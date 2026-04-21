@@ -80,6 +80,7 @@ class TradingBotWithDashboard:
         self._fill_task = None
         self._live_fill_task = None
         self._portfolio_sync_task = None
+        self._heartbeat_task = None
         self._stopping = False
         self._seen_trade_ids: set[str] = set()
         self._live_fill_bootstrapped = False
@@ -167,6 +168,14 @@ class TradingBotWithDashboard:
                 self._sync_live_portfolio_metrics(),
                 name="sync_live_portfolio_metrics",
             )
+
+        # Heartbeat: periodically log core counters so an idle bot (e.g. MM
+        # disabled + no bundle-arb opportunities) doesn't look frozen between
+        # the "Matching complete!" line and the next event.
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(),
+            name="heartbeat",
+        )
         
         # Start the web server
         await self._start_server()
@@ -327,6 +336,69 @@ class TradingBotWithDashboard:
                 break
             except Exception as e:
                 logger.error(f"Fill simulation error: {e}")
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically log alive-state and core counters.
+
+        Without this, a correctly-configured bot that simply has no current
+        opportunities (e.g. MM disabled + tightly-priced game markets) emits
+        zero log lines after startup and looks frozen. The heartbeat surfaces
+        the fact that we're still polling, how many markets we're watching,
+        how many signals/orders we've produced, and the current PnL view.
+        """
+        interval = 60.0
+        last_signal_count = 0
+        last_order_count = 0
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+
+                markets_tracked = (
+                    len(self.data_feed._markets) if self.data_feed else 0
+                )
+                arb_stats = self.arb_engine.get_stats() if self.arb_engine else {}
+                exec_stats = (
+                    self.execution_engine.get_stats() if self.execution_engine else None
+                )
+                signal_count = int(arb_stats.get("signals_generated", 0)) if isinstance(arb_stats, dict) else 0
+                orders_placed = int(getattr(exec_stats, "orders_placed", 0) or 0)
+                orders_filled = int(getattr(exec_stats, "orders_filled", 0) or 0)
+
+                new_signals = signal_count - last_signal_count
+                new_orders = orders_placed - last_order_count
+                last_signal_count = signal_count
+                last_order_count = orders_placed
+
+                pnl = self.portfolio.get_pnl() if self.portfolio else {"total_pnl": 0.0}
+                exposure = (
+                    self.portfolio.get_total_exposure() if self.portfolio else 0.0
+                )
+
+                kill_switch = False
+                if self.risk_manager is not None:
+                    risk_summary = self.risk_manager.get_summary()
+                    kill_switch = bool(risk_summary.get("kill_switch_triggered", False))
+
+                logger.info(
+                    "heartbeat | markets=%d | signals(total/new60s)=%d/%d | "
+                    "orders_placed/filled=%d/%d (new placed in 60s=%d) | "
+                    "session PnL=$%.2f | exposure=$%.2f%s",
+                    markets_tracked,
+                    signal_count,
+                    new_signals,
+                    orders_placed,
+                    orders_filled,
+                    new_orders,
+                    float(pnl.get("total_pnl", 0.0)),
+                    float(exposure),
+                    " | KILL SWITCH ACTIVE" if kill_switch else "",
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("heartbeat error: %s", exc)
 
     async def _poll_live_fills(self) -> None:
         """Poll recent live trades and propagate new fills through local state."""
@@ -631,6 +703,7 @@ class TradingBotWithDashboard:
         await _cancel_task(self._portfolio_sync_task, "sync_live_portfolio_metrics")
         await _cancel_task(self._kalshi_task, "kalshi_monitoring")
         await _cancel_task(self._matching_task, "market_matching")
+        await _cancel_task(self._heartbeat_task, "heartbeat")
 
         await _stop_component(self.dashboard_integration, "dashboard_integration")
         await _stop_component(self.data_feed, "data_feed")
@@ -653,16 +726,49 @@ class TradingBotWithDashboard:
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     logger.warning("Timed out waiting for server task cancellation")
         
-        # Final summary
+        # Final summary. Distinguish between *this session* (what the bot did
+        # while running) and *account lifetime* (what the exchange reports for
+        # the wallet, independent of this process). Earlier versions conflated
+        # the two and made it look like trades had been placed when none had.
         if self.portfolio:
             summary = self.portfolio.get_summary()
+            session_trades = 0
+            session_orders_placed = 0
+            if self.execution_engine is not None:
+                exec_stats = self.execution_engine.get_stats()
+                session_trades = int(getattr(exec_stats, "orders_filled", 0) or 0)
+                session_orders_placed = int(getattr(exec_stats, "orders_placed", 0) or 0)
+
             logger.info("=" * 60)
             logger.info("Final Summary")
             logger.info("=" * 60)
-            logger.info(f"Total PnL: ${summary['pnl']['total_pnl']:.2f}")
-            logger.info(f"Trades: {summary['total_trades']}")
-            logger.info(f"Win Rate: {summary['win_rate']:.1%}")
-        
+            logger.info("This session:")
+            logger.info(
+                "  Orders placed: %s | Fills: %s",
+                session_orders_placed,
+                session_trades,
+            )
+            local_pnl = summary.get("local_pnl", summary["pnl"])
+            logger.info(
+                "  Session PnL (this process only): $%.2f realized, $%.2f unrealized",
+                float(local_pnl.get("realized_pnl", 0.0)),
+                float(local_pnl.get("unrealized_pnl", 0.0)),
+            )
+            if summary.get("source") == "exchange" or "exchange_pnl" in summary:
+                ex = summary.get("exchange_pnl", summary["pnl"])
+                logger.info("Account lifetime (from Polymarket):")
+                logger.info(
+                    "  Total PnL: $%.2f (realized $%.2f, unrealized $%.2f)",
+                    float(ex.get("total_pnl", 0.0)),
+                    float(ex.get("realized_pnl", 0.0)),
+                    float(ex.get("unrealized_pnl", 0.0)),
+                )
+                logger.info(
+                    "  Lifetime trades: %s | Lifetime win rate: %.1f%%",
+                    int(summary.get("total_trades", 0)),
+                    float(summary.get("win_rate", 0.0)) * 100,
+                )
+
         # Cross-platform summary
         if self.cross_platform_engine:
             cp_stats = self.cross_platform_engine.get_stats()

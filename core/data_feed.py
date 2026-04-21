@@ -195,11 +195,36 @@ class DataFeed:
                     "liquidityNumMin": 200,
                 }
                 markets = await self.client.list_markets(discovery_filters)
-                if not markets:
-                    # Fall back to looser filter set.
-                    markets = await self.client.list_markets(
-                        {"active": True, "closed": False, "archived": False, "limit": 300}
+
+                # Polymarket US currently has only ~20 markets meeting the strict
+                # liquidity bar. If we got few (or none), top up with the looser
+                # active/open universe so bundle arb has more candidates to scan
+                # without giving up the high-liquidity bias entirely.
+                if len(markets) < 50:
+                    strict_count = len(markets)
+                    fallback = await self.client.list_markets(
+                        {
+                            "active": True,
+                            "closed": False,
+                            "archived": False,
+                            "includeHidden": False,
+                            "limit": 300,
+                        },
+                        force_refresh=True,
                     )
+                    if fallback:
+                        seen = {m.market_id for m in markets}
+                        for market in fallback:
+                            if market.market_id in seen:
+                                continue
+                            markets.append(market)
+                            seen.add(market.market_id)
+                        logger.info(
+                            "Strict liquidity filter returned %s markets; "
+                            "topped up to %s with looser active/open filter",
+                            strict_count,
+                            len(markets),
+                        )
 
                 # Prefer liquid/active markets first so price feeds are meaningful.
                 liquid_markets = [

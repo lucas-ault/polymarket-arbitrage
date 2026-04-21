@@ -1,5 +1,7 @@
 """Tests for polymarket client market cache behavior."""
 
+from datetime import datetime
+
 import pytest
 
 from polymarket_client.api import PolymarketClient
@@ -93,3 +95,33 @@ async def test_cancel_order_falls_back_to_rest_when_sdk_cancel_fails():
         "json_data": {"marketSlug": "sports-foo"},
         "use_private": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_get_trades_parses_timestamp_and_stable_fallback_id():
+    client = PolymarketClient(dry_run=False)
+
+    async def _fake_request(*args, **kwargs):
+        return {
+            "activities": [
+                {
+                    "type": "ACTIVITY_TYPE_TRADE",
+                    "createdAt": "2026-04-20T12:34:56Z",
+                    "trade": {
+                        "orderId": "ord-1",
+                        "marketSlug": "event-1",
+                        "price": {"value": "0.61"},
+                        "quantity": "3",
+                        "side": "buy",
+                    },
+                }
+            ]
+        }
+
+    client._request = _fake_request  # type: ignore[method-assign]
+    trades = await client.get_trades(limit=10)
+
+    assert len(trades) == 1
+    assert trades[0].trade_id
+    assert trades[0].market_slug == "event-1"
+    assert trades[0].timestamp == datetime(2026, 4, 20, 12, 34, 56)

@@ -228,6 +228,10 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         monitoring=_build_dataclass(MonitoringConfig, monitoring_data),
         cache=_build_dataclass(CacheConfig, cache_data),
     )
+
+    # Keep mode semantics strict: live trading should never simulate fills.
+    if config.is_live and config.mode.simulate_fills:
+        config.mode.simulate_fills = False
     
     # Validate
     _validate_config(config)

@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -480,6 +480,46 @@ class PolymarketClient(BasePolymarketClient):
             return float(raw or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    @staticmethod
+    def _parse_timestamp(*raw_values: Any) -> datetime:
+        """Parse API timestamps across ISO, epoch-ms, and epoch-sec shapes."""
+        for raw in raw_values:
+            if raw is None:
+                continue
+            if isinstance(raw, datetime):
+                ts = raw
+            elif isinstance(raw, (int, float)):
+                value = float(raw)
+                if value > 1_000_000_000_000:
+                    value /= 1000.0
+                try:
+                    ts = datetime.utcfromtimestamp(value)
+                except (OverflowError, OSError, ValueError):
+                    continue
+            elif isinstance(raw, str):
+                text = raw.strip()
+                if not text:
+                    continue
+                if text.isdigit():
+                    value = float(text)
+                    if value > 1_000_000_000_000:
+                        value /= 1000.0
+                    try:
+                        ts = datetime.utcfromtimestamp(value)
+                    except (OverflowError, OSError, ValueError):
+                        continue
+                else:
+                    try:
+                        ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+            else:
+                continue
+            if ts.tzinfo is not None:
+                ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+            return ts
+        return datetime.utcnow()
 
     def _book_side(self, payload: dict[str, Any], prefix: str) -> TokenOrderBook:
         return TokenOrderBook(
@@ -1114,21 +1154,51 @@ class PolymarketClient(BasePolymarketClient):
                     continue
                 intent = str(trade_obj.get("intent") or "")
                 token_type = TokenType.NO if "SHORT" in intent else TokenType.YES
+                side = self._parse_side(trade_obj.get("side") or trade_obj.get("direction"))
+                price = float(
+                    trade_obj.get("price", {}).get("value")
+                    if isinstance(trade_obj.get("price"), dict)
+                    else (trade_obj.get("price") or 0.0)
+                )
+                size = float(trade_obj.get("qty") or trade_obj.get("quantity") or trade_obj.get("size") or 0.0)
+                timestamp = self._parse_timestamp(
+                    trade_obj.get("createdAt"),
+                    trade_obj.get("created_at"),
+                    trade_obj.get("timestamp"),
+                    trade_obj.get("time"),
+                    item.get("createdAt"),
+                    item.get("created_at"),
+                    item.get("timestamp"),
+                    item.get("time"),
+                )
+                trade_id = str(
+                    trade_obj.get("id")
+                    or trade_obj.get("tradeId")
+                    or trade_obj.get("trade_id")
+                    or item.get("id")
+                    or item.get("activityId")
+                    or item.get("activity_id")
+                    or ""
+                )
+                if not trade_id:
+                    order_for_id = str(trade_obj.get("orderId") or trade_obj.get("order_id") or "unknown-order")
+                    ts_ms = int(timestamp.timestamp() * 1000)
+                    trade_id = (
+                        f"{resolved_market_id}:{order_for_id}:{ts_ms}:"
+                        f"{side.value}:{price:.6f}:{size:.6f}"
+                    )
                 trades.append(
                     Trade(
-                        trade_id=str(trade_obj.get("id") or trade_obj.get("tradeId") or trade_obj.get("trade_id") or ""),
+                        trade_id=trade_id,
                         order_id=str(trade_obj.get("orderId") or trade_obj.get("order_id") or ""),
                         market_id=resolved_market_id,
                         market_slug=market_slug,
                         token_type=token_type,
-                        side=self._parse_side(trade_obj.get("side") or trade_obj.get("direction")),
-                        price=float(
-                            trade_obj.get("price", {}).get("value")
-                            if isinstance(trade_obj.get("price"), dict)
-                            else (trade_obj.get("price") or 0.0)
-                        ),
-                        size=float(trade_obj.get("qty") or trade_obj.get("quantity") or trade_obj.get("size") or 0.0),
+                        side=side,
+                        price=price,
+                        size=size,
                         fee=self._amount_value(trade_obj.get("fee")),
+                        timestamp=timestamp,
                     )
                 )
             return trades[-max(1, limit) :]

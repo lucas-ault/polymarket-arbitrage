@@ -55,7 +55,9 @@ cache:
         load_config(str(config_path))
 
 
-def test_live_mode_requires_key_id_and_secret_key(tmp_path: Path):
+def test_live_mode_requires_key_id_and_secret_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("POLYMARKET_KEY_ID", "")
+    monkeypatch.setenv("POLYMARKET_SECRET_KEY", "")
     config_path = tmp_path / "config.yaml"
     _write_config(
         config_path,
@@ -93,3 +95,22 @@ api:
     assert config.api.secret_key == "env-secret"
     assert config.api.use_websocket is True
     assert config.api.use_rest_fallback is True
+
+
+def test_live_mode_forces_simulate_fills_off(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    _write_config(
+        config_path,
+        """
+mode:
+  trading_mode: live
+  simulate_fills: true
+api:
+  key_id: "live-key"
+  secret_key: "live-secret"
+""",
+    )
+
+    config = load_config(str(config_path))
+    assert config.is_live is True
+    assert config.mode.simulate_fills is False

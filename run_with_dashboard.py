@@ -329,7 +329,7 @@ class TradingBotWithDashboard:
                 if not trades:
                     continue
                 # Process oldest first so position/PnL updates are monotonic.
-                for trade in sorted(trades, key=lambda t: t.created_at):
+                for trade in sorted(trades, key=lambda t: getattr(t, "timestamp", datetime.utcnow())):
                     if not trade.trade_id or trade.trade_id in self._seen_trade_ids:
                         continue
                     self._seen_trade_ids.add(trade.trade_id)
@@ -632,6 +632,9 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "live"
     elif args.dry_run:
         config.mode.trading_mode = "dry_run"
+    if config.is_live and config.mode.simulate_fills:
+        logger.warning("simulate_fills is enabled but trading_mode is live; forcing simulate_fills=false")
+        config.mode.simulate_fills = False
 
     # Configure logging from config (with CLI verbose override for console output)
     console_level = "DEBUG" if args.verbose else config.logging.console_level

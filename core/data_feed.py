@@ -132,13 +132,36 @@ class DataFeed:
         """Fetch market information for all monitored markets."""
         try:
             if not self.market_ids:
-                # Discover markets if none specified - list_markets returns full Market objects!
-                markets = await self.client.list_markets({"active": True})
+                # Discover markets if none specified - bias towards tradable/liquid markets first.
+                discovery_filters = {
+                    "active": True,
+                    "closed": False,
+                    "archived": False,
+                    "includeHidden": False,
+                    "limit": 300,
+                    "orderBy": ["volumeNum", "liquidityNum"],
+                    "orderDirection": "desc",
+                    "volumeNumMin": 500,
+                    "liquidityNumMin": 200,
+                }
+                markets = await self.client.list_markets(discovery_filters)
+                if not markets:
+                    # Fall back to looser filter set.
+                    markets = await self.client.list_markets(
+                        {"active": True, "closed": False, "archived": False, "limit": 300}
+                    )
 
                 # Prefer liquid/active markets first so price feeds are meaningful.
                 liquid_markets = [
                     market for market in markets
-                    if (market.volume_24h > 0) or (market.liquidity > 0)
+                    if (
+                        (market.volume_24h > 0)
+                        or (market.liquidity > 0)
+                        or (market.best_bid > 0)
+                        or (market.best_ask > 0)
+                        or (market.yes_price > 0)
+                        or (market.no_price > 0)
+                    )
                 ]
                 selected_markets = liquid_markets if liquid_markets else markets
                 selected_markets = selected_markets[:200]

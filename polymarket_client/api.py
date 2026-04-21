@@ -260,6 +260,51 @@ class PolymarketClient(BasePolymarketClient):
                     return [item for item in value if isinstance(item, dict)]
         return []
 
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+            return default
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    @staticmethod
+    def _parse_outcome_prices(raw: Any) -> tuple[float, float]:
+        """Parse outcomePrices from string/list formats into YES/NO floats."""
+        values: list[Any]
+        if isinstance(raw, list):
+            values = raw
+        elif isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                values = parsed if isinstance(parsed, list) else []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                values = []
+        else:
+            values = []
+        yes_price = 0.0
+        no_price = 0.0
+        if len(values) >= 1:
+            try:
+                yes_price = float(values[0] or 0.0)
+            except (TypeError, ValueError):
+                yes_price = 0.0
+        if len(values) >= 2:
+            try:
+                no_price = float(values[1] or 0.0)
+            except (TypeError, ValueError):
+                no_price = 0.0
+        return yes_price, no_price
+
     def _parse_market(self, data: dict[str, Any]) -> Optional[Market]:
         slug = str(
             data.get("slug")
@@ -272,6 +317,11 @@ class PolymarketClient(BasePolymarketClient):
             return None
         market_id = str(data.get("id") or slug)
         question = str(data.get("question") or data.get("title") or slug)
+        yes_price, no_price = self._parse_outcome_prices(
+            data.get("outcomePrices") or data.get("outcome_prices")
+        )
+        best_bid = self._amount_value(data.get("bestBid") or data.get("best_bid"))
+        best_ask = self._amount_value(data.get("bestAsk") or data.get("best_ask"))
         market = Market(
             market_id=market_id,
             condition_id=str(data.get("conditionId") or data.get("condition_id") or slug),
@@ -280,9 +330,9 @@ class PolymarketClient(BasePolymarketClient):
             description=str(data.get("description") or ""),
             yes_token_id=str(data.get("yes_token_id") or ""),
             no_token_id=str(data.get("no_token_id") or ""),
-            active=bool(data.get("active", True)),
-            closed=bool(data.get("closed", False)),
-            resolved=bool(data.get("resolved", False)),
+            active=self._to_bool(data.get("active"), default=True),
+            closed=self._to_bool(data.get("closed"), default=False),
+            resolved=self._to_bool(data.get("resolved"), default=False),
             volume_24h=float(
                 data.get("volume24hr")
                 or data.get("volume24h")
@@ -297,6 +347,10 @@ class PolymarketClient(BasePolymarketClient):
                 or data.get("liquidityUsd")
                 or 0.0
             ),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            yes_price=yes_price,
+            no_price=no_price,
             category=str(data.get("category") or ""),
         )
         return market
@@ -512,6 +566,27 @@ class PolymarketClient(BasePolymarketClient):
                         )
             except Exception as exc:
                 logger.debug("BBO fallback failed for %s: %s", slug, exc)
+
+        # Last resort: seed top-of-book from /v1/markets snapshot fields.
+        if not yes_book.bids.levels and not yes_book.asks.levels:
+            if market.best_bid > 0:
+                yes_book.bids.levels = [PriceLevel(price=market.best_bid, size=1.0)]
+            if market.best_ask > 0:
+                yes_book.asks.levels = [PriceLevel(price=market.best_ask, size=1.0)]
+            if not yes_book.bids.levels and not yes_book.asks.levels and market.yes_price > 0:
+                bid = max(0.01, market.yes_price - 0.01)
+                ask = min(0.99, market.yes_price + 0.01)
+                yes_book.bids.levels = [PriceLevel(price=bid, size=1.0)]
+                yes_book.asks.levels = [PriceLevel(price=ask, size=1.0)]
+            no_book = TokenOrderBook(
+                TokenType.NO,
+                OrderBookSide(
+                    [PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in yes_book.asks.levels]
+                ),
+                OrderBookSide(
+                    [PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in yes_book.bids.levels]
+                ),
+            )
 
         return OrderBook(market_id=market.market_id, yes=yes_book, no=no_book, timestamp=datetime.utcnow())
 

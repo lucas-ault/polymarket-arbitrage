@@ -181,6 +181,10 @@ class Market:
     # Volume and liquidity
     volume_24h: float = 0.0
     liquidity: float = 0.0
+    best_bid: float = 0.0
+    best_ask: float = 0.0
+    yes_price: float = 0.0
+    no_price: float = 0.0
     
     # Timestamps
     created_at: Optional[datetime] = None

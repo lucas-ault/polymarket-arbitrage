@@ -102,6 +102,11 @@ class ArbStats:
     # (insufficient liquidity vs. tight markets vs. real near-miss).
     bundle_scans_total: int = 0
     bundle_skipped_missing_leg: int = 0
+    # Books where the NO side was synthesized as (1 - YES). These can never
+    # host a real bundle arb (YES + synthesized_NO ≡ 1.0) so we skip and
+    # report them separately to make the inventory of "real 2-sided books"
+    # explicit to the operator.
+    bundle_skipped_synthetic_no: int = 0
     bundle_skipped_no_edge: int = 0
     # Best (=largest) gross edge observed across all scans this session.
     # gross = (1 - total_ask) for long, (total_bid - 1) for short. Negative
@@ -340,6 +345,15 @@ class ArbEngine:
         # bundle-arb pipeline is starved of input vs. just seeing tight books.
         if None in (best_ask_yes, best_ask_no, best_bid_yes, best_bid_no):
             self.stats.bundle_skipped_missing_leg += 1
+            return None
+
+        # If the NO side is synthesized as the YES complement, total_ask and
+        # total_bid both collapse to 1 ± spread, so no arb can exist. Skip
+        # these and count them so operators can see how many of their markets
+        # are "fake 2-sided" (Polymarket usually returns only YES quotes for
+        # binary markets and we synthesize NO as 1 - YES for display).
+        if order_book.no.synthetic or order_book.yes.synthetic:
+            self.stats.bundle_skipped_synthetic_no += 1
             return None
 
         total_ask = best_ask_yes + best_ask_no

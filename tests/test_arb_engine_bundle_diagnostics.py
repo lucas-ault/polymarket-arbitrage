@@ -26,6 +26,7 @@ def _book(
     no_bid: float | None,
     no_ask: float | None,
     size: float = 100.0,
+    no_synthetic: bool = False,
 ) -> OrderBook:
     yes_bids = (
         OrderBookSide(levels=[PriceLevel(price=yes_bid, size=size)])
@@ -50,7 +51,12 @@ def _book(
     return OrderBook(
         market_id="m1",
         yes=TokenOrderBook(token_type=TokenType.YES, bids=yes_bids, asks=yes_asks),
-        no=TokenOrderBook(token_type=TokenType.NO, bids=no_bids, asks=no_asks),
+        no=TokenOrderBook(
+            token_type=TokenType.NO,
+            bids=no_bids,
+            asks=no_asks,
+            synthetic=no_synthetic,
+        ),
     )
 
 
@@ -111,6 +117,26 @@ def test_best_observed_gross_edges_track_max(engine: ArbEngine):
     assert engine.stats.bundle_best_gross_long == pytest.approx(-0.005, abs=1e-9)
     # Best gross short tracks max(total_bid - 1). All bids are < 0.5 so short edge is negative.
     assert engine.stats.bundle_best_gross_short < 0
+
+
+def test_synthetic_no_book_is_skipped_and_counted_separately(engine: ArbEngine):
+    """Books with a synthesized NO leg can never host real arb (YES + NO ≡ 1)."""
+    # Synthetic NO: NO bid = 1 - YES ask, NO ask = 1 - YES bid.
+    book = _book(
+        yes_bid=0.49,
+        yes_ask=0.51,
+        no_bid=0.49,
+        no_ask=0.51,
+        no_synthetic=True,
+    )
+
+    result = engine._check_bundle_arbitrage("m1", book)
+
+    assert result is None
+    assert engine.stats.bundle_scans_total == 1
+    assert engine.stats.bundle_skipped_synthetic_no == 1
+    assert engine.stats.bundle_skipped_missing_leg == 0
+    assert engine.stats.bundle_skipped_no_edge == 0
 
 
 def test_real_arb_opportunity_increments_signals_not_no_edge(engine: ArbEngine):

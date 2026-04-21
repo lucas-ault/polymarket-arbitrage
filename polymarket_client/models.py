@@ -88,6 +88,11 @@ class TokenOrderBook:
     bids: OrderBookSide = field(default_factory=OrderBookSide)
     asks: OrderBookSide = field(default_factory=OrderBookSide)
     last_update: datetime = field(default_factory=datetime.utcnow)
+    # True when this side was synthesized as the (1 - other_side) complement
+    # rather than parsed from real exchange-reported quotes. Bundle arbitrage
+    # uses this to reject pseudo-2-sided books, since YES + synthesized_NO is
+    # mathematically forced to ~1.0 and never crosses min_edge.
+    synthetic: bool = False
     
     @property
     def best_bid(self) -> Optional[float]:

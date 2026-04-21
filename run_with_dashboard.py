@@ -406,6 +406,9 @@ class TradingBotWithDashboard:
                         missing = int(
                             getattr(arb_stats, "bundle_skipped_missing_leg", 0) or 0
                         )
+                        synthetic = int(
+                            getattr(arb_stats, "bundle_skipped_synthetic_no", 0) or 0
+                        )
                         no_edge = int(
                             getattr(arb_stats, "bundle_skipped_no_edge", 0) or 0
                         )
@@ -415,15 +418,17 @@ class TradingBotWithDashboard:
                         best_short = float(
                             getattr(arb_stats, "bundle_best_gross_short", float("-inf"))
                         )
-                        two_sided = max(scans - missing, 0)
-                        two_sided_pct = (two_sided / scans * 100.0) if scans else 0.0
+                        scannable = max(scans - missing - synthetic, 0)
+                        scannable_pct = (scannable / scans * 100.0) if scans else 0.0
                         logger.info(
-                            "  bundle scans=%d | one-sided=%d (%.0f%% two-sided) | "
-                            "no-edge=%d | best gross long=%s | best gross short=%s | "
-                            "min_edge=%.4f",
+                            "  bundle scans=%d | one-sided=%d | synthetic-NO=%d | "
+                            "real-2-sided=%d (%.0f%%) | no-edge=%d | "
+                            "best gross long=%s | best gross short=%s | min_edge=%.4f",
                             scans,
                             missing,
-                            two_sided_pct,
+                            synthetic,
+                            scannable,
+                            scannable_pct,
                             no_edge,
                             f"{best_long:+.4f}" if best_long != float("-inf") else "n/a",
                             f"{best_short:+.4f}" if best_short != float("-inf") else "n/a",

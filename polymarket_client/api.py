@@ -582,16 +582,12 @@ class PolymarketClient(BasePolymarketClient):
             asks=OrderBookSide(levels=self._parse_price_levels(payload.get("no_asks") or payload.get("short_asks"))),
         )
 
-        # If API returns only one side (best bid/ask), synthesize complements.
+        # If the YES side is completely empty, the API likely returned a flat
+        # one-sided shape (top-level "bids"/"asks") — populate YES from that.
         if not yes_book.bids.levels and not yes_book.asks.levels:
             bids = self._parse_price_levels(payload.get("bids"))
             asks = self._parse_price_levels(payload.get("asks") or payload.get("offers"))
             yes_book = TokenOrderBook(TokenType.YES, OrderBookSide(bids), OrderBookSide(asks))
-            no_book = TokenOrderBook(
-                TokenType.NO,
-                OrderBookSide([PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in asks]),
-                OrderBookSide([PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in bids]),
-            )
 
         # If full book is unavailable, fall back to BBO for top-of-book prices.
         if not yes_book.bids.levels and not yes_book.asks.levels:
@@ -614,16 +610,6 @@ class PolymarketClient(BasePolymarketClient):
                         yes_book.bids.levels = [PriceLevel(price=best_bid, size=bid_depth)]
                     if best_ask > 0:
                         yes_book.asks.levels = [PriceLevel(price=best_ask, size=ask_depth)]
-                    if yes_book.bids.levels or yes_book.asks.levels:
-                        no_book = TokenOrderBook(
-                            TokenType.NO,
-                            OrderBookSide(
-                                [PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in yes_book.asks.levels]
-                            ),
-                            OrderBookSide(
-                                [PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in yes_book.bids.levels]
-                            ),
-                        )
             except Exception as exc:
                 logger.debug("BBO fallback failed for %s: %s", slug, exc)
 
@@ -638,14 +624,31 @@ class PolymarketClient(BasePolymarketClient):
                 ask = min(0.99, market.yes_price + 0.01)
                 yes_book.bids.levels = [PriceLevel(price=bid, size=1.0)]
                 yes_book.asks.levels = [PriceLevel(price=ask, size=1.0)]
+
+        # Synthesize NO from YES whenever the API didn't return a real NO book.
+        # Polymarket binary markets share liquidity between the YES and NO
+        # complement (price_NO = 1 - price_YES) and the API frequently returns
+        # only one side. Without this synthesis, bundle arbitrage saw 100% of
+        # markets as one-sided and skipped every scan. Mirroring is bid<->ask:
+        # NO bids at (1 - YES asks), NO asks at (1 - YES bids).
+        # We mark the synthesized side so bundle arbitrage knows to skip it
+        # (synthesized YES+NO is forced to sum to ~1.0 and can't host an arb).
+        if not no_book.bids.levels and not no_book.asks.levels:
             no_book = TokenOrderBook(
                 TokenType.NO,
                 OrderBookSide(
-                    [PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in yes_book.asks.levels]
+                    [
+                        PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size)
+                        for level in yes_book.asks.levels
+                    ]
                 ),
                 OrderBookSide(
-                    [PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in yes_book.bids.levels]
+                    [
+                        PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size)
+                        for level in yes_book.bids.levels
+                    ]
                 ),
+                synthetic=True,
             )
 
         return OrderBook(market_id=market.market_id, yes=yes_book, no=no_book, timestamp=datetime.utcnow())

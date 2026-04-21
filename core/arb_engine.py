@@ -743,8 +743,18 @@ class ArbEngine:
         self.stats.last_opportunity_time = datetime.utcnow()
         
         logger.info(
-            f"MM opportunity: {market_id}/{token_type.value} | "
-            f"spread={spread:.4f} | our_spread={our_spread:.4f} | size={order_size:.2f}"
+            "MM opportunity: %s/%s | bid=%.4f ask=%.4f | our_bid=%.4f our_ask=%.4f | "
+            "spread=%.4f | our_spread=%.4f | midpoint=%.4f | size=%.2f",
+            market_id,
+            token_type.value,
+            best_bid,
+            best_ask,
+            our_bid,
+            our_ask,
+            spread,
+            our_spread,
+            midpoint,
+            order_size,
         )
         self._start_tracking_opportunity(opportunity)
         

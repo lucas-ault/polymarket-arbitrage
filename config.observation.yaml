@@ -22,7 +22,7 @@ trading:
   mm_enabled: true
   default_order_size: 1
   min_order_size: 1
-  max_order_size: 2
+  max_order_size: 1
   slippage_tolerance: 0.01
   order_timeout_seconds: 60
   fee_mode: "polymarket_us"
@@ -32,10 +32,10 @@ trading:
   fee_theta_maker: -0.0125
 
 risk:
-  max_position_per_market: 5
-  max_global_exposure: 20
-  max_daily_loss: 3
-  max_drawdown_pct: 0.12
+  max_position_per_market: 2
+  max_global_exposure: 10
+  max_daily_loss: 1.5
+  max_drawdown_pct: 0.10
   trade_only_high_volume: false
   min_24h_volume: 0
   whitelist: []
@@ -52,7 +52,7 @@ mode:
   cross_platform_match_start_delay_seconds: 5.0
   cross_platform_match_process_workers: 3
   cross_platform_candidate_limit: 220
-  dry_run_initial_balance: 20
+  dry_run_initial_balance: 10
   simulate_fills: true
   fill_probability: 0.2
 

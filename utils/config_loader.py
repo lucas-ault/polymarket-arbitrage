@@ -42,6 +42,12 @@ class TradingConfig:
     markets: list[str] = field(default_factory=list)
     min_edge: float = 0.01
     bundle_arb_enabled: bool = True
+    # N-way event-bundle arbitrage: scan each multi-outcome event and trigger
+    # when sum(YES asks) across all outcomes < 1 - edge - fees, or sum(YES
+    # bids) > 1 + edge + fees. This is the only form of bundle arb that can
+    # actually work on polymarket.us (which does not expose separate NO
+    # books). Defaults off until the engine implementation lands.
+    event_bundle_arb_enabled: bool = False
     min_spread: float = 0.05
     tick_size: float = 0.01
     mm_enabled: bool = True

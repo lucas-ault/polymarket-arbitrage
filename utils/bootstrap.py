@@ -68,6 +68,7 @@ def _build_arb_engine(config: BotConfig) -> ArbEngine:
     return ArbEngine(ArbConfig(
         min_edge=config.trading.min_edge,
         bundle_arb_enabled=config.trading.bundle_arb_enabled,
+        event_bundle_arb_enabled=config.trading.event_bundle_arb_enabled,
         min_spread=config.trading.min_spread,
         mm_max_spread=config.trading.mm_max_spread,
         mm_min_price=config.trading.mm_min_price,

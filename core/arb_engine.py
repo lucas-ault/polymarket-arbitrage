@@ -34,6 +34,12 @@ class ArbConfig:
     # Bundle arbitrage
     min_edge: float = 0.01  # Minimum edge required (1%)
     bundle_arb_enabled: bool = True
+    # N-way event-bundle arbitrage. When true, the engine groups markets by
+    # event_id and triggers signals when sum(YES asks) across all outcomes of
+    # an event falls below 1 - edge - fees (or sum(YES bids) > 1 + edge +
+    # fees). This is the only form of bundle arb that can host real edge on
+    # polymarket.us. Off until the multi-leg execution path is built.
+    event_bundle_arb_enabled: bool = False
     
     # Market-making
     min_spread: float = 0.05  # Minimum spread to MM (5c)
@@ -153,6 +159,25 @@ class ArbEngine:
         self._position_probe = None
 
         logger.info(f"ArbEngine initialized with min_edge={config.min_edge}, min_spread={config.min_spread}")
+
+        # Loud warning when binary bundle arb is on against polymarket.us.
+        # The upstream repo (ImMike/polymarket-arbitrage) was designed for
+        # polymarket.com (international) which exposes separate YES and NO
+        # orderbooks. polymarket.us only exposes ONE orderbook per binary
+        # market (the YES side); NO is just (1 - YES) under the hood. So
+        # buying YES + buying NO collapses to a zero net position that just
+        # pays the spread. This warning fires here, NOT in config validation,
+        # so the operator sees it on every restart and can't ignore it.
+        if config.bundle_arb_enabled:
+            logger.warning(
+                "BINARY bundle arbitrage is ENABLED but is structurally "
+                "impossible on polymarket.us (single-orderbook per binary "
+                "market; NO is synthesized as 1 - YES). Set "
+                "trading.bundle_arb_enabled: false to silence this and stop "
+                "wasting CPU on impossible scans. The right strategy here is "
+                "n-way event-bundle arb (sum of YES asks across all outcomes "
+                "of a multi-outcome event)."
+            )
 
     def set_position_probe(self, probe) -> None:
         """Register a callback that returns current contract count on a leg.

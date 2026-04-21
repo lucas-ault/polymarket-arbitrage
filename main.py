@@ -18,6 +18,7 @@ import logging
 import signal
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from polymarket_client import PolymarketClient
@@ -27,7 +28,7 @@ from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from utils.config_loader import load_config, BotConfig
-from utils.logging_utils import setup_logging, performance_logger
+from utils.logging_utils import setup_logging, performance_logger, trade_logger
 from utils.redis_cache import RedisCacheConfig, create_cache_store
 
 
@@ -383,6 +384,33 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "live"
     elif args.dry_run:
         config.mode.trading_mode = "dry_run"
+
+    # Configure logging from config (with CLI verbose override for console output)
+    console_level = "DEBUG" if args.verbose else config.logging.console_level
+    setup_logging(
+        log_dir=config.logging.log_dir,
+        console_level=console_level,
+        file_level=config.logging.file_level,
+        main_log_file=config.logging.main_log_file,
+        trades_log_file=config.logging.trades_log_file,
+        opportunities_log_file=config.logging.opportunities_log_file,
+        max_size_mb=config.logging.max_log_size_mb,
+        backup_count=config.logging.backup_count,
+    )
+    trade_logger.set_context(
+        entrypoint="main.py",
+        config_path=str(Path(args.config).expanduser().resolve()),
+        trading_mode=config.mode.trading_mode,
+        simulate_fills=config.mode.simulate_fills,
+        fill_probability=config.mode.fill_probability,
+        min_edge=config.trading.min_edge,
+        min_spread=config.trading.min_spread,
+        default_order_size=config.trading.default_order_size,
+        max_order_size=config.trading.max_order_size,
+        trade_only_high_volume=config.risk.trade_only_high_volume,
+        min_24h_volume=config.risk.min_24h_volume,
+    )
+    trade_logger.log_session_start()
     
     # Run backtest if requested
     if args.backtest:
@@ -471,10 +499,6 @@ Examples:
     )
     
     args = parser.parse_args()
-    
-    # Set up logging
-    log_level = "DEBUG" if args.verbose else "INFO"
-    setup_logging(console_level=log_level)
     
     # Run the async main
     try:

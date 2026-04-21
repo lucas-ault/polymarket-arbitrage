@@ -20,6 +20,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import uvicorn
 
@@ -32,7 +33,7 @@ from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine
 from utils.config_loader import load_config, BotConfig
-from utils.logging_utils import setup_logging
+from utils.logging_utils import setup_logging, trade_logger
 from utils.redis_cache import RedisCacheConfig, create_cache_store
 from dashboard.server import app, dashboard_state
 from dashboard.integration import DashboardIntegration
@@ -278,11 +279,6 @@ class TradingBotWithDashboard:
                     suggested_size=signal.opportunity.suggested_size,
                 )
             
-            self.dashboard_integration.add_signal(
-                action=signal.action,
-                market_id=signal.market_id,
-            )
-            
             # Submit to execution
             if not self.execution_engine.submit_signal_nowait(signal):
                 logger.warning("Execution queue full; dropping dashboard signal %s", signal.signal_id)
@@ -377,48 +373,28 @@ class TradingBotWithDashboard:
                 self._matching_task = asyncio.create_task(self._run_matching_background(polymarket_markets))
     
     async def _run_matching_background(self, polymarket_markets: list) -> None:
-        """Run market matching with process-parallel scoring and async progress updates."""
+        """Run market matching with live progress updates."""
         try:
             dashboard_state.cross_platform["matching_status"] = "matching"
-            total = len(polymarket_markets) * len(self._kalshi_markets)
+            total = 0
             dashboard_state.cross_platform["matching_total"] = total
             matching_started_at = time.perf_counter()
-            
-            loop = asyncio.get_event_loop()
-            progress_queue: asyncio.Queue[dict] = asyncio.Queue()
-            
-            def run_matching_sync():
-                def on_progress(checked, total_comparisons, matches_found):
-                    loop.call_soon_threadsafe(
-                        progress_queue.put_nowait,
-                        {
-                            "checked": checked,
-                            "total": total_comparisons,
-                            "matches_found": matches_found,
-                        },
-                    )
-                return self.market_matcher.find_matches_parallel(
-                    polymarket_markets=polymarket_markets,
-                    kalshi_markets=self._kalshi_markets,
-                    on_progress=on_progress,
-                    process_workers=self.config.mode.cross_platform_match_process_workers,
-                    candidate_limit=self.config.mode.cross_platform_candidate_limit,
-                )
-            
-            matching_future = asyncio.create_task(asyncio.to_thread(run_matching_sync))
-            while not matching_future.done():
-                try:
-                    progress = await asyncio.wait_for(progress_queue.get(), timeout=0.25)
-                except asyncio.TimeoutError:
-                    continue
-                dashboard_state.cross_platform["matching_checked"] = progress["checked"]
-                total_comparisons = progress["total"]
+
+            def on_progress(checked, total_comparisons, matches_found):
+                dashboard_state.cross_platform["matching_checked"] = checked
+                dashboard_state.cross_platform["matching_total"] = total_comparisons
                 dashboard_state.cross_platform["matching_progress"] = (
-                    int(progress["checked"] / total_comparisons * 100)
+                    int(checked / total_comparisons * 100)
                     if total_comparisons > 0 else 0
                 )
-                dashboard_state.cross_platform["matched_pairs"] = progress["matches_found"]
-            self._matched_pairs = await matching_future
+                dashboard_state.cross_platform["matched_pairs"] = matches_found
+
+            self._matched_pairs = await self.market_matcher.find_matches(
+                polymarket_markets=polymarket_markets,
+                kalshi_markets=self._kalshi_markets,
+                on_progress=on_progress,
+                candidate_limit=self.config.mode.cross_platform_candidate_limit,
+            )
             
             dashboard_state.cross_platform["matching_status"] = "complete"
             dashboard_state.cross_platform["matching_progress"] = 100
@@ -517,39 +493,49 @@ class TradingBotWithDashboard:
         
         logger.info("Shutting down...")
         self._running = False
-        
-        if self._fill_task:
-            self._fill_task.cancel()
+
+        async def _cancel_task(task: asyncio.Task | None, name: str, timeout: float = 3.0) -> None:
+            if not task:
+                return
+            task.cancel()
             try:
-                await self._fill_task
+                await asyncio.wait_for(task, timeout=timeout)
             except asyncio.CancelledError:
                 pass
-        
-        if self._kalshi_task:
-            self._kalshi_task.cancel()
+            except asyncio.TimeoutError:
+                logger.warning("Timeout cancelling task %s; continuing shutdown", name)
+            except Exception as exc:
+                logger.warning("Error while cancelling task %s: %s", name, exc)
+
+        async def _stop_component(component, name: str, timeout: float = 5.0) -> None:
+            if not component:
+                return
             try:
-                await self._kalshi_task
-            except asyncio.CancelledError:
-                pass
-        
-        if self._matching_task:
-            self._matching_task.cancel()
+                await asyncio.wait_for(component.stop(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout stopping %s; continuing shutdown", name)
+            except Exception as exc:
+                logger.warning("Error while stopping %s: %s", name, exc)
+
+        async def _run_with_timeout(coro, name: str, timeout: float = 5.0) -> None:
+            if not coro:
+                return
             try:
-                await self._matching_task
-            except asyncio.CancelledError:
-                pass
-        
-        if self.dashboard_integration:
-            await self.dashboard_integration.stop()
-        
-        if self.data_feed:
-            await self.data_feed.stop()
-        
-        if self.execution_engine:
-            await self.execution_engine.stop()
-        
+                await asyncio.wait_for(coro, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout during %s; continuing shutdown", name)
+            except Exception as exc:
+                logger.warning("Error during %s: %s", name, exc)
+
+        await _cancel_task(self._fill_task, "simulate_fills")
+        await _cancel_task(self._kalshi_task, "kalshi_monitoring")
+        await _cancel_task(self._matching_task, "market_matching")
+
+        await _stop_component(self.dashboard_integration, "dashboard_integration")
+        await _stop_component(self.data_feed, "data_feed")
+        await _stop_component(self.execution_engine, "execution_engine")
         if self.client:
-            await self.client.disconnect()
+            await _run_with_timeout(self.client.disconnect(), "client_disconnect")
         
         # Kalshi client is closed via async context manager in _start_kalshi_monitoring
         
@@ -562,9 +548,9 @@ class TradingBotWithDashboard:
             except asyncio.TimeoutError:
                 self._server_task.cancel()
                 try:
-                    await self._server_task
-                except asyncio.CancelledError:
-                    pass
+                    await asyncio.wait_for(self._server_task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    logger.warning("Timed out waiting for server task cancellation")
         
         # Final summary
         if self.portfolio:
@@ -607,6 +593,33 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "live"
     elif args.dry_run:
         config.mode.trading_mode = "dry_run"
+
+    # Configure logging from config (with CLI verbose override for console output)
+    console_level = "DEBUG" if args.verbose else config.logging.console_level
+    setup_logging(
+        log_dir=config.logging.log_dir,
+        console_level=console_level,
+        file_level=config.logging.file_level,
+        main_log_file=config.logging.main_log_file,
+        trades_log_file=config.logging.trades_log_file,
+        opportunities_log_file=config.logging.opportunities_log_file,
+        max_size_mb=config.logging.max_log_size_mb,
+        backup_count=config.logging.backup_count,
+    )
+    trade_logger.set_context(
+        entrypoint="run_with_dashboard.py",
+        config_path=str(Path(args.config).expanduser().resolve()),
+        trading_mode=config.mode.trading_mode,
+        simulate_fills=config.mode.simulate_fills,
+        fill_probability=config.mode.fill_probability,
+        min_edge=config.trading.min_edge,
+        min_spread=config.trading.min_spread,
+        default_order_size=config.trading.default_order_size,
+        max_order_size=config.trading.max_order_size,
+        trade_only_high_volume=config.risk.trade_only_high_volume,
+        min_24h_volume=config.risk.min_24h_volume,
+    )
+    trade_logger.log_session_start()
     
     # Create and run bot with dashboard
     bot = TradingBotWithDashboard(config, port=args.port, host=args.host)
@@ -614,11 +627,21 @@ async def main_async(args: argparse.Namespace) -> None:
     # Handle shutdown
     loop = asyncio.get_event_loop()
     shutdown_event = asyncio.Event()
-    quit_task = None
+    stdin_reader_registered = False
     
     def signal_handler():
         logger.info("Shutdown signal received")
         shutdown_event.set()
+
+    def on_stdin_ready() -> None:
+        """Handle terminal input without blocking executor threads."""
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return
+        if line and line.strip().lower() in {"q", "quit", "exit", "stop"}:
+            logger.info("Quit command received from terminal.")
+            shutdown_event.set()
     
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -630,23 +653,13 @@ async def main_async(args: argparse.Namespace) -> None:
         await bot.start()
         
         if sys.stdin and sys.stdin.isatty():
-            logger.info("Type 'q' and press Enter to quit.")
-            
-            async def quit_listener() -> None:
-                while not shutdown_event.is_set():
-                    try:
-                        line = await asyncio.to_thread(sys.stdin.readline)
-                    except Exception:
-                        return
-                    if not line:
-                        await asyncio.sleep(0.1)
-                        continue
-                    if line.strip().lower() in {"q", "quit", "exit", "stop"}:
-                        logger.info("Quit command received from terminal.")
-                        shutdown_event.set()
-                        return
-            
-            quit_task = asyncio.create_task(quit_listener(), name="quit_listener")
+            try:
+                loop.add_reader(sys.stdin.fileno(), on_stdin_ready)
+                stdin_reader_registered = True
+                logger.info("Type 'q' and press Enter to quit.")
+            except (NotImplementedError, OSError, ValueError):
+                # Some environments do not support add_reader for stdin.
+                logger.info("Quit shortcut unavailable in this terminal; use Ctrl+C to stop.")
         
         # Wait for shutdown
         await shutdown_event.wait()
@@ -654,11 +667,10 @@ async def main_async(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        if quit_task:
-            quit_task.cancel()
+        if stdin_reader_registered:
             try:
-                await quit_task
-            except asyncio.CancelledError:
+                loop.remove_reader(sys.stdin.fileno())
+            except Exception:
                 pass
         await bot.stop()
 
@@ -708,10 +720,6 @@ def main() -> None:
     )
     
     args = parser.parse_args()
-    
-    # Setup logging
-    log_level = "DEBUG" if args.verbose else "INFO"
-    setup_logging(console_level=log_level)
     
     # Run
     try:

@@ -25,6 +25,7 @@ from polymarket_client.models import (
 )
 from core.risk_manager import RiskManager
 from core.portfolio import Portfolio
+from utils.logging_utils import trade_logger
 
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,15 @@ class ExecutionEngine:
                     if not self._check_slippage(signal.opportunity, order_spec):
                         self.stats.slippage_rejections += 1
                         logger.warning(f"Order rejected due to slippage: {order_spec}")
+                        trade_logger.log_order_rejected(
+                            market_id=signal.market_id,
+                            side=side.value,
+                            token=token_type.value,
+                            price=price,
+                            size=size,
+                            strategy=strategy_tag,
+                            reason="slippage_check_failed",
+                        )
                         continue
                 
                 # Check risk limits
@@ -227,6 +237,15 @@ class ExecutionEngine:
                 if not self.risk_manager.check_order(proposed_order):
                     self.stats.signals_rejected += 1
                     logger.warning(f"Order rejected by risk manager: {order_spec}")
+                    trade_logger.log_order_rejected(
+                        market_id=signal.market_id,
+                        side=side.value,
+                        token=token_type.value,
+                        price=price,
+                        size=size,
+                        strategy=strategy_tag,
+                        reason="risk_manager_rejected",
+                    )
                     continue
                 
                 # Place the order
@@ -313,6 +332,15 @@ class ExecutionEngine:
                     f"Order placed: {order.order_id} | "
                     f"{side.value} {size:.2f} {token_type.value} @ {price:.4f}"
                 )
+                trade_logger.log_order_placed(
+                    order_id=order.order_id,
+                    market_id=market_id,
+                    side=side.value,
+                    token=token_type.value,
+                    price=price,
+                    size=size,
+                    strategy=strategy_tag,
+                )
                 
                 return order
                 
@@ -367,6 +395,7 @@ class ExecutionEngine:
             self._untrack_order(order_id)
             self.stats.orders_cancelled += 1
             logger.info(f"Order cancelled: {order_id}")
+            trade_logger.log_order_cancelled(order_id=order_id, reason="cancel_request")
             return True
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
@@ -442,6 +471,20 @@ class ExecutionEngine:
         
         # Update risk manager
         self.risk_manager.update_from_fill(trade)
+        pnl = self.portfolio.get_pnl()
+        trade_logger.log_order_filled(
+            trade_id=trade.trade_id,
+            order_id=trade.order_id,
+            market_id=trade.market_id,
+            side=trade.side.value,
+            token=trade.token_type.value,
+            price=trade.price,
+            size=trade.size,
+            fee=trade.fee,
+            pnl_total=pnl.get("total_pnl"),
+            pnl_realized=pnl.get("realized_pnl"),
+            pnl_unrealized=pnl.get("unrealized_pnl"),
+        )
         
         logger.info(
             f"Fill: {trade.trade_id} | "

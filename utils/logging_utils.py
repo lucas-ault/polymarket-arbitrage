@@ -5,10 +5,11 @@ Logging Utilities
 Configures structured logging for the trading bot.
 """
 
+import json
 import logging
-import os
 import sys
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -82,20 +83,24 @@ def setup_logging(
     ))
     root_logger.addHandler(main_handler)
     
-    # Trades log file handler
+    # Trades log file handler (supports absolute or ~/ paths)
     trades_logger = logging.getLogger("trades")
+    trades_path = Path(trades_log_file).expanduser()
+    if not trades_path.is_absolute():
+        trades_path = log_path / trades_log_file
+    trades_path.parent.mkdir(parents=True, exist_ok=True)
+
     trades_handler = RotatingFileHandler(
-        log_path / trades_log_file,
+        trades_path,
         maxBytes=max_size_mb * 1024 * 1024,
         backupCount=backup_count,
     )
     trades_handler.setLevel(logging.DEBUG)
     trades_handler.setFormatter(logging.Formatter(
-        "%(asctime)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S.%f"
+        "%(message)s"
     ))
     trades_logger.addHandler(trades_handler)
-    trades_logger.propagate = True
+    trades_logger.propagate = False
     
     # Opportunities log file handler
     opps_logger = logging.getLogger("opportunities")
@@ -117,7 +122,13 @@ def setup_logging(
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
     
-    logging.info(f"Logging initialized | console={console_level} | file={file_level} | dir={log_dir}")
+    logging.info(
+        "Logging initialized | console=%s | file=%s | dir=%s | trades_journal=%s",
+        console_level,
+        file_level,
+        log_dir,
+        trades_path,
+    )
 
 
 class ColoredFormatter(logging.Formatter):
@@ -157,6 +168,26 @@ class TradeLogger:
     
     def __init__(self):
         self.logger = logging.getLogger("trades")
+        self.session_id = f"session-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+        self._context: dict[str, object] = {}
+
+    def set_context(self, **context: object) -> None:
+        """Attach static metadata emitted with every journal event."""
+        self._context.update(context)
+
+    def _emit(self, event: str, **fields: object) -> None:
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            "session_id": self.session_id,
+            **self._context,
+            **fields,
+        }
+        self.logger.log(TRADE, json.dumps(payload, separators=(",", ":")))
+
+    def log_session_start(self) -> None:
+        """Emit a session start marker for backtesting/tuning analysis."""
+        self._emit("SESSION_START")
     
     def log_order_placed(
         self,
@@ -169,10 +200,16 @@ class TradeLogger:
         strategy: str = "",
     ) -> None:
         """Log an order placement."""
-        self.logger.log(
-            TRADE,
-            f"ORDER_PLACED | id={order_id} | market={market_id} | "
-            f"{side} {size:.4f} {token} @ {price:.4f} | strategy={strategy}"
+        self._emit(
+            "ORDER_PLACED",
+            order_id=order_id,
+            market_id=market_id,
+            side=side,
+            token=token,
+            price=price,
+            size=size,
+            notional=price * size,
+            strategy=strategy,
         )
     
     def log_order_filled(
@@ -185,19 +222,56 @@ class TradeLogger:
         price: float,
         size: float,
         fee: float = 0.0,
+        pnl_total: Optional[float] = None,
+        pnl_realized: Optional[float] = None,
+        pnl_unrealized: Optional[float] = None,
     ) -> None:
         """Log an order fill."""
-        self.logger.log(
-            TRADE,
-            f"ORDER_FILLED | trade={trade_id} | order={order_id} | market={market_id} | "
-            f"{side} {size:.4f} {token} @ {price:.4f} | fee={fee:.4f}"
+        self._emit(
+            "ORDER_FILLED",
+            trade_id=trade_id,
+            order_id=order_id,
+            market_id=market_id,
+            side=side,
+            token=token,
+            price=price,
+            size=size,
+            fee=fee,
+            notional=price * size,
+            pnl_total=pnl_total,
+            pnl_realized=pnl_realized,
+            pnl_unrealized=pnl_unrealized,
         )
     
     def log_order_cancelled(self, order_id: str, reason: str = "") -> None:
         """Log an order cancellation."""
-        self.logger.log(
-            TRADE,
-            f"ORDER_CANCELLED | id={order_id} | reason={reason}"
+        self._emit(
+            "ORDER_CANCELLED",
+            order_id=order_id,
+            reason=reason,
+        )
+
+    def log_order_rejected(
+        self,
+        market_id: str,
+        side: str,
+        token: str,
+        price: float,
+        size: float,
+        strategy: str,
+        reason: str,
+    ) -> None:
+        """Log an execution rejection event."""
+        self._emit(
+            "ORDER_REJECTED",
+            market_id=market_id,
+            side=side,
+            token=token,
+            price=price,
+            size=size,
+            notional=price * size,
+            strategy=strategy,
+            reason=reason,
         )
 
 

@@ -590,9 +590,12 @@ class MarketMatcher:
             k_count = len(kalshi_by_cat.get(cat, []))
             logger.info(f"  {cat}: Polymarket={p_count}, Kalshi={k_count}")
         
-        # Calculate total comparisons (only within categories)
+        # Calculate total comparisons (candidate-limited within categories)
         total_comparisons = sum(
-            len(poly_by_cat.get(cat, [])) * len(kalshi_by_cat.get(cat, []))
+            len(poly_by_cat.get(cat, [])) * max(
+                1,
+                min(len(kalshi_by_cat.get(cat, [])), max(1, candidate_limit)),
+            )
             for cat in set(list(poly_by_cat.keys()) + list(kalshi_by_cat.keys()))
         )
         

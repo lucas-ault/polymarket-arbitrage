@@ -101,7 +101,7 @@ logging:
   # Log files
   log_dir: "logs"
   main_log_file: "bot.log"
-  trades_log_file: "trades.log"
+  trades_log_file: "~/.polymarket-arbitrage/trades/trades.jsonl"
   opportunities_log_file: "opportunities.log"
   
   # Log rotation

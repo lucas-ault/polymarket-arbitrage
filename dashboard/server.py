@@ -1805,17 +1805,17 @@ def get_embedded_html() -> str:
         
         function updateActivity() {
             const list = document.getElementById('activityList');
-            const signals = state.signals || [];
             const trades = state.trades || [];
-            
-            // Combine and sort by timestamp
-            const activities = [
-                ...signals.map(s => ({...s, activityType: 'signal'})),
-                ...trades.map(t => ({...t, activityType: 'trade'}))
-            ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)).slice(0, 30);
+            const stats = state.stats || {};
+            const activities = trades
+                .map(t => ({...t, activityType: 'trade'}))
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                .slice(0, 30);
             
             if (activities.length === 0) {
-                list.innerHTML = '<div class="empty-state"><div class="empty-icon">📝</div><div>No activity yet...</div></div>';
+                const placed = stats.orders_placed || 0;
+                const rejected = (stats.orders_rejected || 0) + (stats.signals_rejected || 0);
+                list.innerHTML = `<div class="empty-state"><div class="empty-icon">📝</div><div>No executed/fill activity yet...</div><div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem;">Placed: ${placed} | Rejected: ${rejected}</div></div>`;
                 return;
             }
             
@@ -1828,10 +1828,6 @@ def get_embedded_html() -> str:
                     icon = '✓';
                     iconClass = 'fill';
                     message = `${act.side} ${(act.size || 0).toFixed(2)} @ ${(act.price || 0).toFixed(4)}`;
-                } else {
-                    icon = '→';
-                    iconClass = 'signal';
-                    message = `${act.action || 'Signal'}: ${act.market_id || ''}`;
                 }
                 
                 return `

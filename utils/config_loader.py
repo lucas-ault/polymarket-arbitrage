@@ -91,7 +91,7 @@ class LoggingConfig:
     file_level: str = "DEBUG"
     log_dir: str = "logs"
     main_log_file: str = "bot.log"
-    trades_log_file: str = "trades.log"
+    trades_log_file: str = "~/.polymarket-arbitrage/trades/trades.jsonl"
     opportunities_log_file: str = "opportunities.log"
     max_log_size_mb: int = 50
     backup_count: int = 5

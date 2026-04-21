@@ -142,6 +142,9 @@ class DashboardIntegration:
                 "orders_placed": stats.orders_placed,
                 "orders_filled": stats.orders_filled,
                 "orders_cancelled": stats.orders_cancelled,
+                "orders_rejected": stats.orders_rejected,
+                "signals_rejected": stats.signals_rejected,
+                "slippage_rejections": stats.slippage_rejections,
                 "signals_processed": stats.signals_processed,
             }
         

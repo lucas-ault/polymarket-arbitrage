@@ -542,6 +542,7 @@ class ArbEngine:
             f"MM opportunity: {market_id}/{token_type.value} | "
             f"spread={spread:.4f} | our_spread={our_spread:.4f} | size={order_size:.2f}"
         )
+        self._start_tracking_opportunity(opportunity)
         
         # Generate signal with both bid and ask orders
         orders = [

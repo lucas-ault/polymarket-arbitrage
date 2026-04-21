@@ -358,11 +358,11 @@ class TradingBotWithDashboard:
                 markets_tracked = (
                     len(self.data_feed._markets) if self.data_feed else 0
                 )
-                arb_stats = self.arb_engine.get_stats() if self.arb_engine else {}
+                arb_stats = self.arb_engine.get_stats() if self.arb_engine else None
                 exec_stats = (
                     self.execution_engine.get_stats() if self.execution_engine else None
                 )
-                signal_count = int(arb_stats.get("signals_generated", 0)) if isinstance(arb_stats, dict) else 0
+                signal_count = int(getattr(arb_stats, "signals_generated", 0) or 0)
                 orders_placed = int(getattr(exec_stats, "orders_placed", 0) or 0)
                 orders_filled = int(getattr(exec_stats, "orders_filled", 0) or 0)
 
@@ -395,6 +395,42 @@ class TradingBotWithDashboard:
                     float(exposure),
                     " | KILL SWITCH ACTIVE" if kill_switch else "",
                 )
+
+                # Bundle-arb visibility: when signals=0, show the operator
+                # *why*. Distinguishes "no liquid 2-sided books to scan" from
+                # "books are healthy but spreads stay tight enough that no
+                # mispricing crosses min_edge".
+                if arb_stats is not None:
+                    scans = int(getattr(arb_stats, "bundle_scans_total", 0) or 0)
+                    if scans > 0:
+                        missing = int(
+                            getattr(arb_stats, "bundle_skipped_missing_leg", 0) or 0
+                        )
+                        no_edge = int(
+                            getattr(arb_stats, "bundle_skipped_no_edge", 0) or 0
+                        )
+                        best_long = float(
+                            getattr(arb_stats, "bundle_best_gross_long", float("-inf"))
+                        )
+                        best_short = float(
+                            getattr(arb_stats, "bundle_best_gross_short", float("-inf"))
+                        )
+                        two_sided = max(scans - missing, 0)
+                        two_sided_pct = (two_sided / scans * 100.0) if scans else 0.0
+                        logger.info(
+                            "  bundle scans=%d | one-sided=%d (%.0f%% two-sided) | "
+                            "no-edge=%d | best gross long=%s | best gross short=%s | "
+                            "min_edge=%.4f",
+                            scans,
+                            missing,
+                            two_sided_pct,
+                            no_edge,
+                            f"{best_long:+.4f}" if best_long != float("-inf") else "n/a",
+                            f"{best_short:+.4f}" if best_short != float("-inf") else "n/a",
+                            float(self.arb_engine.config.min_edge)
+                            if self.arb_engine is not None
+                            else 0.0,
+                        )
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001

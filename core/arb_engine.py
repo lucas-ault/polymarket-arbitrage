@@ -96,7 +96,19 @@ class ArbStats:
     mm_opportunities_detected: int = 0
     signals_generated: int = 0
     last_opportunity_time: Optional[datetime] = None
-    
+
+    # Bundle-arb diagnostic counters. Surfaced by get_stats() and the dashboard
+    # heartbeat so an operator can tell *why* we're not generating signals
+    # (insufficient liquidity vs. tight markets vs. real near-miss).
+    bundle_scans_total: int = 0
+    bundle_skipped_missing_leg: int = 0
+    bundle_skipped_no_edge: int = 0
+    # Best (=largest) gross edge observed across all scans this session.
+    # gross = (1 - total_ask) for long, (total_bid - 1) for short. Negative
+    # means the order book was wider than $1.00, i.e. nowhere near an arb.
+    bundle_best_gross_long: float = float("-inf")
+    bundle_best_gross_short: float = float("-inf")
+
     # Opportunity duration tracking
     total_opportunities_tracked: int = 0
     avg_opportunity_duration_ms: float = 0.0
@@ -314,18 +326,33 @@ class ArbEngine:
         
         Fees are factored in to ensure net profitability!
         """
+        self.stats.bundle_scans_total += 1
+
         # Get prices
         best_ask_yes = order_book.best_ask_yes
         best_ask_no = order_book.best_ask_no
         best_bid_yes = order_book.best_bid_yes
         best_bid_no = order_book.best_bid_no
-        
-        # Need all prices to evaluate
+
+        # Need all prices to evaluate. One-sided books (common on long-tail
+        # Polymarket markets where only one leg has resting liquidity) get
+        # counted separately so the operator can tell at a glance whether the
+        # bundle-arb pipeline is starved of input vs. just seeing tight books.
         if None in (best_ask_yes, best_ask_no, best_bid_yes, best_bid_no):
+            self.stats.bundle_skipped_missing_leg += 1
             return None
-        
+
         total_ask = best_ask_yes + best_ask_no
         total_bid = best_bid_yes + best_bid_no
+
+        # Track best-observed gross edges so an operator can answer the
+        # question "are we *close* to a bundle opp anywhere?" without grepping.
+        gross_long_observed = 1.0 - total_ask
+        gross_short_observed = total_bid - 1.0
+        if gross_long_observed > self.stats.bundle_best_gross_long:
+            self.stats.bundle_best_gross_long = gross_long_observed
+        if gross_short_observed > self.stats.bundle_best_gross_short:
+            self.stats.bundle_best_gross_short = gross_short_observed
         
         # Fee per contract leg on polymarket.us:
         # fee = theta * contracts * p * (1 - p), with contracts=1 for edge math.
@@ -416,8 +443,9 @@ class ArbEngine:
             )
         
         if not opportunity:
+            self.stats.bundle_skipped_no_edge += 1
             return None
-        
+
         # Check cooldown to avoid spam
         cooldown_key = f"{market_id}_{opportunity.opportunity_type.value}"
         if cooldown_key in self._opportunity_cooldown:

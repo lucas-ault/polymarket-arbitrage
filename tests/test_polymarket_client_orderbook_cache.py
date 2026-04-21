@@ -204,3 +204,41 @@ async def test_get_portfolio_metrics_combines_positions_activities_and_balances(
     assert metrics["total_exposure"] == 80.0
     assert metrics["total_trades"] == 2
     assert metrics["win_rate"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_metrics_returns_partial_data_when_positions_fail():
+    client = PolymarketClient(dry_run=False)
+
+    async def _fake_request(method, endpoint, params=None, json_data=None, use_private=False):
+        if endpoint == "/v1/portfolio/positions":
+            raise RuntimeError("429 Too Many Requests")
+        if endpoint == "/v1/account/balances":
+            return {
+                "balances": [
+                    {
+                        "currency": "USD",
+                        "currentBalance": 99.0,
+                        "buyingPower": 88.0,
+                        "assetNotional": 11.0,
+                    }
+                ]
+            }
+        if endpoint == "/v1/portfolio/activities":
+            return {
+                "activities": [
+                    {
+                        "type": "ACTIVITY_TYPE_TRADE",
+                        "trade": {"realizedPnl": {"value": "0.75", "currency": "USD"}},
+                    }
+                ]
+            }
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    client._request = _fake_request  # type: ignore[method-assign]
+    metrics = await client.get_portfolio_metrics(activity_limit=50)
+
+    assert metrics["balances"]["current_balance"] == 99.0
+    assert metrics["total_exposure"] == 11.0
+    assert metrics["total_trades"] == 1
+    assert metrics["pnl"]["realized_pnl"] == 0.0  # realized from positions unavailable

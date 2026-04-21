@@ -80,6 +80,7 @@ class TradingBotWithDashboard:
         self._portfolio_sync_task = None
         self._stopping = False
         self._seen_trade_ids: set[str] = set()
+        self._live_fill_bootstrapped = False
     
     async def start(self) -> None:
         """Start the bot and dashboard."""
@@ -206,7 +207,7 @@ class TradingBotWithDashboard:
         self.data_feed = DataFeed(
             client=self.client,
             market_ids=market_ids,
-            position_refresh_interval=5.0,
+            position_refresh_interval=30.0 if self.config.is_live else 5.0,
             on_update=self._on_market_update,
             config=self.config,
         )
@@ -393,6 +394,16 @@ class TradingBotWithDashboard:
                 trades = await self.client.get_trades(limit=200)
                 if not trades:
                     continue
+                if not self._live_fill_bootstrapped:
+                    for trade in trades:
+                        if trade.trade_id:
+                            self._seen_trade_ids.add(trade.trade_id)
+                    self._live_fill_bootstrapped = True
+                    logger.info(
+                        "Live fill poll bootstrapped with %s historical trades; processing only new fills",
+                        len(self._seen_trade_ids),
+                    )
+                    continue
                 # Process oldest first so position/PnL updates are monotonic.
                 for trade in sorted(trades, key=lambda t: getattr(t, "timestamp", datetime.utcnow())):
                     if not trade.trade_id or trade.trade_id in self._seen_trade_ids:
@@ -417,7 +428,7 @@ class TradingBotWithDashboard:
             return
         while self._running:
             try:
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(15.0)
                 metrics = await self.client.get_portfolio_metrics(activity_limit=200)
                 if not metrics:
                     continue

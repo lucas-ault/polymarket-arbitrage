@@ -1260,6 +1260,10 @@ class PolymarketClient(BasePolymarketClient):
         """Return exchange-reported portfolio metrics for dashboard/risk sync."""
         if self.dry_run:
             return {}
+        positions_payload: dict[str, Any] = {}
+        balances: list[dict[str, Any]] = []
+        activities_payload: dict[str, Any] = {}
+
         try:
             positions_payload = await self._request(
                 "GET",
@@ -1267,13 +1271,25 @@ class PolymarketClient(BasePolymarketClient):
                 params={"limit": 200},
                 use_private=True,
             )
+        except Exception as exc:
+            logger.warning("Failed to fetch portfolio positions for metrics: %s", exc)
+
+        try:
             balances = await self.get_account_balances()
+        except Exception:
+            balances = []
+
+        try:
             activities_payload = await self._request(
                 "GET",
                 "/v1/portfolio/activities",
                 params={"limit": max(1, min(200, activity_limit))},
                 use_private=True,
             )
+        except Exception as exc:
+            logger.warning("Failed to fetch portfolio activities for metrics: %s", exc)
+
+        try:
             positions_map = (
                 positions_payload.get("positions")
                 if isinstance(positions_payload, dict)
@@ -1316,6 +1332,9 @@ class PolymarketClient(BasePolymarketClient):
             total_exposure = self._amount_value(primary_balance.get("assetNotional"))
             win_rate_den = winning_trades + losing_trades
             win_rate = (winning_trades / win_rate_den) if win_rate_den > 0 else 0.0
+
+            if not positions_map and not activities and not balances:
+                return {}
 
             return {
                 "source": "exchange_portfolio_api",

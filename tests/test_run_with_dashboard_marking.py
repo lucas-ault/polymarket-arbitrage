@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from run_with_dashboard import TradingBotWithDashboard
+from polymarket_client.models import OrderSide, TokenType, Trade
 
 
 def _market_state(
@@ -52,3 +53,38 @@ def test_estimate_token_mark_prices_uses_complement_when_one_side_missing():
     yes_price, no_price = prices
     assert yes_price == 0.62
     assert no_price == 0.38
+
+
+def test_live_fill_bootstrap_marks_existing_trades_as_seen():
+    bot = TradingBotWithDashboard.__new__(TradingBotWithDashboard)
+    bot._seen_trade_ids = set()
+    bot._live_fill_bootstrapped = False
+
+    existing = [
+        Trade(
+            trade_id="t-1",
+            order_id="o-1",
+            market_id="m-1",
+            token_type=TokenType.YES,
+            side=OrderSide.BUY,
+            price=0.5,
+            size=1.0,
+        ),
+        Trade(
+            trade_id="t-2",
+            order_id="o-2",
+            market_id="m-1",
+            token_type=TokenType.YES,
+            side=OrderSide.BUY,
+            price=0.5,
+            size=1.0,
+        ),
+    ]
+
+    for trade in existing:
+        if trade.trade_id:
+            bot._seen_trade_ids.add(trade.trade_id)
+    bot._live_fill_bootstrapped = True
+
+    assert bot._live_fill_bootstrapped is True
+    assert bot._seen_trade_ids == {"t-1", "t-2"}

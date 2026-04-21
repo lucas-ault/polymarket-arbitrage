@@ -69,6 +69,8 @@ def _build_arb_engine(config: BotConfig) -> ArbEngine:
         min_edge=config.trading.min_edge,
         bundle_arb_enabled=config.trading.bundle_arb_enabled,
         min_spread=config.trading.min_spread,
+        mm_max_spread=config.trading.mm_max_spread,
+        mm_cooldown_seconds=config.trading.mm_cooldown_seconds,
         mm_enabled=config.trading.mm_enabled,
         tick_size=config.trading.tick_size,
         default_order_size=config.trading.default_order_size,
@@ -136,6 +138,7 @@ async def bootstrap_components(
         config=ExecutionConfig(
             slippage_tolerance=config.trading.slippage_tolerance,
             order_timeout_seconds=config.trading.order_timeout_seconds,
+            unplaceable_market_skip_seconds=config.trading.unplaceable_market_skip_seconds,
             dry_run=config.is_dry_run,
         ),
     )

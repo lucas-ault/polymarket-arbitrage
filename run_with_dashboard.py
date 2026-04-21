@@ -374,20 +374,38 @@ class TradingBotWithDashboard:
                 logger.error(f"Live fill poll error: {e}")
 
     async def _sync_live_portfolio_metrics(self) -> None:
-        """Sync exchange portfolio API metrics into dashboard-visible summary."""
+        """Sync exchange portfolio API metrics into dashboard-visible summary.
+
+        Polymarket rate-limits ``/v1/portfolio/activities`` aggressively. We
+        poll on a 60s cadence with a small activity window and back off to
+        120s on 429s instead of dropping into a tight retry loop.
+        """
         if not self.client or not self.portfolio:
             return
+        base_interval = 60.0
+        backoff_interval = 120.0
+        next_sleep = base_interval
         while self._running:
             try:
-                await asyncio.sleep(15.0)
-                metrics = await self.client.get_portfolio_metrics(activity_limit=200)
+                await asyncio.sleep(next_sleep)
+                metrics = await self.client.get_portfolio_metrics(activity_limit=50)
                 if not metrics:
+                    next_sleep = base_interval
                     continue
                 self.portfolio.apply_exchange_metrics(metrics)
+                next_sleep = base_interval
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Portfolio sync error: {e}")
+                msg = str(e).lower()
+                if "429" in msg or "too many requests" in msg or "rate" in msg:
+                    logger.warning(
+                        "Portfolio sync rate-limited; backing off to %.0fs", backoff_interval,
+                    )
+                    next_sleep = backoff_interval
+                else:
+                    logger.error(f"Portfolio sync error: {e}")
+                    next_sleep = base_interval
     
     async def _start_kalshi_monitoring(self) -> None:
         """Start monitoring Kalshi markets for cross-platform arbitrage."""

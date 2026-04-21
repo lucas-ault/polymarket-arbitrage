@@ -37,6 +37,12 @@ class ArbConfig:
     
     # Market-making
     min_spread: float = 0.05  # Minimum spread to MM (5c)
+    # Maximum spread we'll quote into. Spreads wider than this almost always
+    # indicate no real liquidity (a single resting quote on each side); MM
+    # there just spams orders that never fill. 1.0 disables the cap.
+    mm_max_spread: float = 1.0
+    # Cooldown before re-emitting an MM signal for the same (market, token).
+    mm_cooldown_seconds: float = 5.0
     mm_enabled: bool = True
     tick_size: float = 0.01
     
@@ -504,14 +510,22 @@ class ArbEngine:
         # Check if spread is wide enough
         if spread < self.config.min_spread:
             return None
-        
+
+        # Skip pathologically wide spreads — these are dead books, not
+        # liquidity opportunities. Quoting here just spams orders that never
+        # fill and racks up "market not found" / cancel churn.
+        if self.config.mm_max_spread > 0 and spread > self.config.mm_max_spread:
+            return None
+
         # Check cooldown
         cooldown_key = f"mm_{market_id}_{token_type.value}"
         if cooldown_key in self._opportunity_cooldown:
             if datetime.utcnow() < self._opportunity_cooldown[cooldown_key]:
                 return None
-        
-        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(seconds=5)
+
+        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(
+            seconds=max(0.5, self.config.mm_cooldown_seconds)
+        )
         
         # Calculate our prices (inside the spread)
         our_bid = best_bid + self.config.tick_size

@@ -45,11 +45,22 @@ class TradingConfig:
     min_spread: float = 0.05
     tick_size: float = 0.01
     mm_enabled: bool = True
+    # Skip market-making in markets whose visible spread exceeds this. Wide
+    # spreads on prediction markets almost always mean there is no real
+    # liquidity (single resting quotes) and quoting into them just spams the
+    # book without filling. Default 1.0 disables the cap.
+    mm_max_spread: float = 1.0
+    # How long to suppress repeat MM signals on the same (market, token).
+    mm_cooldown_seconds: float = 5.0
     default_order_size: float = 50.0
     min_order_size: float = 5.0
     max_order_size: float = 200.0
     slippage_tolerance: float = 0.02
     order_timeout_seconds: float = 60.0
+    # When the API returns a permanent error for a market (e.g. "market not
+    # found", 404), the execution engine drops further attempts on it for
+    # this many seconds. Set to 0 to disable.
+    unplaceable_market_skip_seconds: float = 300.0
     fee_mode: str = "polymarket_us"
     maker_fee_bps: float = -125.0
     taker_fee_bps: float = 500.0

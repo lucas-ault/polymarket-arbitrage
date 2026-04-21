@@ -41,6 +41,11 @@ class ExecutionConfig:
     enable_slippage_check: bool = True
     dry_run: bool = True
     max_signal_queue_size: int = 5000
+    # When the API rejects an order with a permanent error (e.g. "market not
+    # found" / 404), suppress further attempts on that market for this many
+    # seconds. Prevents the bot from hammering closed/non-placeable markets
+    # discovered by the public catalog. 0 disables.
+    unplaceable_market_skip_seconds: float = 300.0
 
 
 @dataclass
@@ -86,6 +91,11 @@ class ExecutionEngine:
         # Order tracking by market and strategy
         self._orders_by_market: dict[str, list[str]] = {}
         self._orders_by_strategy: dict[str, list[str]] = {}
+
+        # Markets whose orders the API has permanently rejected. We skip new
+        # signals for them until this timestamp passes. Keeps the log readable
+        # and stops us burning rate-limit budget on dead markets.
+        self._unplaceable_until: dict[str, datetime] = {}
         
         # Signal queue
         self._signal_queue: asyncio.Queue[Signal] = asyncio.Queue(maxsize=self.config.max_signal_queue_size)
@@ -196,8 +206,36 @@ class ExecutionEngine:
         else:
             logger.warning(f"Unknown signal action: {signal.action}")
     
+    def _is_market_unplaceable(self, market_id: str) -> bool:
+        """Return True if we've recently been rejected on this market."""
+        until = self._unplaceable_until.get(market_id)
+        if not until:
+            return False
+        if datetime.utcnow() >= until:
+            self._unplaceable_until.pop(market_id, None)
+            return False
+        return True
+
+    def _mark_market_unplaceable(self, market_id: str, reason: str) -> None:
+        """Suppress further order attempts on a market for the configured TTL."""
+        ttl = max(0.0, float(self.config.unplaceable_market_skip_seconds))
+        if ttl <= 0:
+            return
+        self._unplaceable_until[market_id] = datetime.utcnow() + timedelta(seconds=ttl)
+        logger.warning(
+            "Marking market %s as unplaceable for %.0fs (%s)",
+            market_id, ttl, reason,
+        )
+
     async def _handle_place_orders(self, signal: Signal) -> None:
         """Handle a place_orders signal."""
+        if self._is_market_unplaceable(signal.market_id):
+            # Drop quietly — the warning was already logged when we first
+            # decided to skip this market. Counts as a rejection so dashboards
+            # still see the pressure.
+            self.stats.signals_rejected += len(signal.orders) or 1
+            return
+
         for order_spec in signal.orders:
             try:
                 # Extract order parameters
@@ -305,6 +343,23 @@ class ExecutionEngine:
         
         return abs(slippage) <= self.config.slippage_tolerance
     
+    # Substrings we treat as permanent placement errors. Retrying these is
+    # pointless and just burns rate-limit budget.
+    _PERMANENT_ORDER_ERRORS: tuple[str, ...] = (
+        "market not found",
+        "not found",
+        "market is closed",
+        "market closed",
+        "market is resolved",
+        "invalid market",
+        "404",
+    )
+
+    @classmethod
+    def _is_permanent_order_error(cls, exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(token in msg for token in cls._PERMANENT_ORDER_ERRORS)
+
     async def _place_order(
         self,
         market_id: str,
@@ -315,8 +370,8 @@ class ExecutionEngine:
         strategy_tag: str = "",
     ) -> Optional[Order]:
         """Place an order through the API with retry logic."""
-        last_error = None
-        
+        last_error: Optional[BaseException] = None
+
         for attempt in range(self.config.max_retries):
             try:
                 order = await self.client.place_order(
@@ -327,7 +382,7 @@ class ExecutionEngine:
                     size=size,
                     strategy_tag=strategy_tag,
                 )
-                
+
                 logger.info(
                     f"Order placed: {order.order_id} | "
                     f"{side.value} {size:.2f} {token_type.value} @ {price:.4f}"
@@ -341,16 +396,30 @@ class ExecutionEngine:
                     size=size,
                     strategy=strategy_tag,
                 )
-                
+
                 return order
-                
+
             except Exception as e:
                 last_error = e
-                logger.warning(f"Order placement attempt {attempt + 1} failed: {e}")
+                if self._is_permanent_order_error(e):
+                    logger.warning(
+                        "Order placement permanently rejected for market %s: %s",
+                        market_id, e,
+                    )
+                    self._mark_market_unplaceable(market_id, str(e))
+                    return None
+
+                logger.warning(
+                    "Order placement attempt %d/%d failed for market %s: %s",
+                    attempt + 1, self.config.max_retries, market_id, e,
+                )
                 if attempt < self.config.max_retries - 1:
                     await asyncio.sleep(self.config.retry_delay)
-        
-        logger.error(f"Order placement failed after {self.config.max_retries} attempts: {last_error}")
+
+        logger.error(
+            "Order placement failed after %d attempts for market %s: %s",
+            self.config.max_retries, market_id, last_error,
+        )
         return None
     
     def _track_order(self, order: Order) -> None:

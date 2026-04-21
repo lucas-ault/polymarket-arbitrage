@@ -271,6 +271,8 @@ class TradingBotWithDashboard:
         """Handle market updates."""
         if not self._running:
             return
+
+        self._mark_portfolio_to_market(market_id, market_state)
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():
@@ -292,6 +294,64 @@ class TradingBotWithDashboard:
             # Submit to execution
             if not self.execution_engine.submit_signal_nowait(signal):
                 logger.warning("Execution queue full; dropping dashboard signal %s", signal.signal_id)
+
+    @staticmethod
+    def _pick_mark_price(best_bid: float | None, best_ask: float | None, fallback: float | None) -> float | None:
+        """Pick a conservative mark price from top-of-book and snapshot fallbacks."""
+        bid = float(best_bid) if best_bid is not None else 0.0
+        ask = float(best_ask) if best_ask is not None else 0.0
+        fb = float(fallback) if fallback is not None else 0.0
+
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if ask > 0:
+            return ask
+        if bid > 0:
+            return bid
+        if fb > 0:
+            return fb
+        return None
+
+    def _estimate_token_mark_prices(self, market_state) -> tuple[float, float] | None:
+        """Estimate YES/NO mark prices from the latest market state."""
+        if not market_state:
+            return None
+        order_book = market_state.order_book
+        market = market_state.market
+        yes_price = self._pick_mark_price(
+            order_book.best_bid_yes,
+            order_book.best_ask_yes,
+            market.yes_price,
+        )
+        no_price = self._pick_mark_price(
+            order_book.best_bid_no,
+            order_book.best_ask_no,
+            market.no_price,
+        )
+
+        if yes_price is None and no_price is not None:
+            yes_price = max(0.0, min(1.0, 1.0 - no_price))
+        if no_price is None and yes_price is not None:
+            no_price = max(0.0, min(1.0, 1.0 - yes_price))
+        if yes_price is None or no_price is None:
+            return None
+        return yes_price, no_price
+
+    def _mark_portfolio_to_market(self, market_id: str, market_state) -> None:
+        """Keep portfolio and risk PnL aligned with latest market prices."""
+        if not self.portfolio:
+            return
+        prices = self._estimate_token_mark_prices(market_state)
+        if not prices:
+            return
+        yes_price, no_price = prices
+        self.portfolio.update_prices(market_id, yes_price=yes_price, no_price=no_price)
+        if self.risk_manager:
+            pnl = self.portfolio.get_pnl()
+            self.risk_manager.update_pnl(
+                realized_pnl=float(pnl.get("realized_pnl", 0.0)),
+                unrealized_pnl=float(pnl.get("unrealized_pnl", 0.0)),
+            )
     
     async def _simulate_fills(self) -> None:
         """Simulate order fills in dry run mode."""

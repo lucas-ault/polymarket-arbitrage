@@ -66,6 +66,8 @@ class RiskManager:
         
         # Per-market exposure tracking
         self._market_exposure: dict[str, float] = {}
+        self._market_positions: dict[str, dict[TokenType, float]] = {}
+        self._market_prices: dict[str, dict[TokenType, float]] = {}
         
         # Volume cache
         self._market_volumes: dict[str, float] = {}
@@ -112,25 +114,25 @@ class RiskManager:
                 )
                 return False
         
-        # Per-market exposure check
-        current_market_exposure = self._market_exposure.get(order.market_id, 0)
-        new_exposure = order.notional if order.side == OrderSide.BUY else -order.notional
-        projected_exposure = abs(current_market_exposure + new_exposure)
+        # Per-market exposure check (count only incremental absolute exposure).
+        current_market_exposure = self._market_exposure.get(order.market_id, 0.0)
+        incremental_exposure = self._estimate_incremental_exposure(order)
+        projected_exposure = current_market_exposure + incremental_exposure
         
         if projected_exposure > self.config.max_position_per_market:
             logger.warning(
                 f"Order rejected: would exceed market limit | "
-                f"current={current_market_exposure:.2f} + order={new_exposure:.2f} = "
+                f"current={current_market_exposure:.2f} + order={incremental_exposure:.2f} = "
                 f"{projected_exposure:.2f} > {self.config.max_position_per_market}"
             )
             return False
         
         # Global exposure check
-        projected_global = max(0.0, self.state.global_exposure + new_exposure)
+        projected_global = self.state.global_exposure + incremental_exposure
         if projected_global > self.config.max_global_exposure:
             logger.warning(
                 f"Order rejected: would exceed global limit | "
-                f"current={self.state.global_exposure:.2f} + order={new_exposure:.2f} = "
+                f"current={self.state.global_exposure:.2f} + order={incremental_exposure:.2f} = "
                 f"{projected_global:.2f} > {self.config.max_global_exposure}"
             )
             return False
@@ -165,21 +167,15 @@ class RiskManager:
         price: float
     ) -> None:
         """Update position tracking after a trade."""
-        notional_change = abs(size_delta * price)
-        
-        if market_id not in self._market_exposure:
-            self._market_exposure[market_id] = 0.0
-        
-        if size_delta > 0:
-            self._market_exposure[market_id] += notional_change
-            self.state.global_exposure += notional_change
-        else:
-            self._market_exposure[market_id] -= notional_change
-            self.state.global_exposure -= notional_change
-        
-        # Ensure non-negative
-        self._market_exposure[market_id] = max(0, self._market_exposure[market_id])
-        self.state.global_exposure = max(0, self.state.global_exposure)
+        market_positions = self._market_positions.setdefault(market_id, {})
+        market_prices = self._market_prices.setdefault(market_id, {})
+
+        current_size = float(market_positions.get(token_type, 0.0))
+        market_positions[token_type] = current_size + float(size_delta)
+        market_prices[token_type] = max(0.0, float(price))
+
+        self._recalculate_market_exposure(market_id)
+        self._recalculate_global_exposure()
         
         self.state.last_check = datetime.utcnow()
     
@@ -296,4 +292,30 @@ class RiskManager:
         if market_id in self.config.blacklist:
             self.config.blacklist.remove(market_id)
             logger.info(f"Market {market_id} removed from blacklist")
+
+    @staticmethod
+    def _signed_order_size(side: OrderSide, size: float) -> float:
+        return float(size) if side == OrderSide.BUY else -float(size)
+
+    def _estimate_incremental_exposure(self, order: Order) -> float:
+        market_positions = self._market_positions.get(order.market_id, {})
+        current_size = float(market_positions.get(order.token_type, 0.0))
+        signed_size = self._signed_order_size(order.side, order.size)
+        projected_size = current_size + signed_size
+        current_abs = abs(current_size)
+        projected_abs = abs(projected_size)
+        incremental_contracts = max(0.0, projected_abs - current_abs)
+        return incremental_contracts * float(order.price)
+
+    def _recalculate_market_exposure(self, market_id: str) -> None:
+        market_positions = self._market_positions.get(market_id, {})
+        market_prices = self._market_prices.get(market_id, {})
+        total = 0.0
+        for token_type, size in market_positions.items():
+            price = float(market_prices.get(token_type, 0.0))
+            total += abs(float(size)) * max(0.0, price)
+        self._market_exposure[market_id] = total
+
+    def _recalculate_global_exposure(self) -> None:
+        self.state.global_exposure = sum(self._market_exposure.values())
 

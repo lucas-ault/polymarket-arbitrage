@@ -91,6 +91,17 @@ class TestOrderValidation:
         order = create_order(size=200.0, price=0.50)  # Additional $100
         assert risk_manager.check_order(order) is False
 
+    def test_sell_from_flat_counts_as_new_short_exposure(self, risk_manager: RiskManager):
+        """Selling while flat opens short risk and must count against limits."""
+        order = create_order(side=OrderSide.SELL, price=1.0, size=250.0)  # $250 > $200 market limit
+        assert risk_manager.check_order(order) is False
+
+    def test_sell_that_reduces_existing_long_does_not_add_exposure(self, risk_manager: RiskManager):
+        """Reducing an existing long should not be blocked by incremental exposure checks."""
+        risk_manager.update_position("test_market", TokenType.YES, 150.0, 1.0)  # $150 exposure
+        reducing_sell = create_order(side=OrderSide.SELL, price=1.0, size=50.0)
+        assert risk_manager.check_order(reducing_sell) is True
+
 
 class TestKillSwitch:
     """Tests for kill switch functionality."""

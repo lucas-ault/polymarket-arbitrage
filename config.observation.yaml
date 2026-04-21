@@ -15,9 +15,9 @@ api:
 trading:
   # Empty list means full auto-discovery from polymarket.us.
   markets: []
-  min_edge: 0.015
+  min_edge: 0.005
   bundle_arb_enabled: true
-  min_spread: 0.03
+  min_spread: 0.01
   tick_size: 0.01
   mm_enabled: true
   default_order_size: 1
@@ -46,8 +46,8 @@ risk:
 mode:
   trading_mode: "dry_run"
   data_mode: "real"
-  cross_platform_enabled: false
-  kalshi_enabled: false
+  cross_platform_enabled: true
+  kalshi_enabled: true
   min_match_similarity: 0.78
   cross_platform_match_start_delay_seconds: 5.0
   cross_platform_match_process_workers: 3

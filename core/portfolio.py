@@ -316,20 +316,18 @@ class Portfolio:
             "markets_traded": len(self._positions),
         }
         if self._exchange_metrics:
-            pnl = self._exchange_metrics.get("pnl")
             balances = self._exchange_metrics.get("balances")
-            if isinstance(pnl, dict):
-                summary["pnl"] = {
-                    "realized_pnl": float(pnl.get("realized_pnl", summary["pnl"]["realized_pnl"])),
-                    "unrealized_pnl": float(pnl.get("unrealized_pnl", summary["pnl"]["unrealized_pnl"])),
-                    "total_pnl": float(pnl.get("total_pnl", summary["pnl"]["total_pnl"])),
-                    "fees_paid": float(pnl.get("fees_paid", summary["pnl"]["fees_paid"])),
-                    "net_pnl": float(pnl.get("net_pnl", summary["pnl"]["net_pnl"])),
-                }
             if isinstance(balances, dict):
                 summary["cash_balance"] = float(balances.get("current_balance", summary["cash_balance"]))
                 summary["buying_power"] = float(balances.get("buying_power", 0.0))
                 summary["exchange_balances"] = balances
+            exchange_pnl = self._exchange_metrics.get("pnl")
+            if isinstance(exchange_pnl, dict):
+                summary["exchange_pnl"] = {
+                    "realized_pnl": float(exchange_pnl.get("realized_pnl", 0.0)),
+                    "unrealized_proxy": float(exchange_pnl.get("unrealized_pnl", 0.0)),
+                    "total_proxy": float(exchange_pnl.get("total_pnl", 0.0)),
+                }
             summary["total_exposure"] = float(
                 self._exchange_metrics.get("total_exposure", summary["total_exposure"])
             )

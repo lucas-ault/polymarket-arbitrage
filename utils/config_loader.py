@@ -64,6 +64,7 @@ class RiskConfig:
     max_global_exposure: float = 5000.0
     max_daily_loss: float = 500.0
     max_drawdown_pct: float = 0.10
+    min_peak_pnl_for_drawdown: float = 1.0
     trade_only_high_volume: bool = True
     min_24h_volume: float = 10000.0
     whitelist: list[str] = field(default_factory=list)
@@ -331,6 +332,8 @@ def _validate_config(config: BotConfig) -> None:
     
     if config.risk.max_drawdown_pct < 0 or config.risk.max_drawdown_pct > 1:
         errors.append("risk.max_drawdown_pct must be between 0 and 1")
+    if config.risk.min_peak_pnl_for_drawdown < 0:
+        errors.append("risk.min_peak_pnl_for_drawdown must be non-negative")
     
     # Mode validation
     if config.mode.trading_mode.lower() not in ("live", "dry_run"):

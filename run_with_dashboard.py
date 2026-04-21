@@ -166,6 +166,7 @@ class TradingBotWithDashboard:
             max_global_exposure=self.config.risk.max_global_exposure,
             max_daily_loss=self.config.risk.max_daily_loss,
             max_drawdown_pct=self.config.risk.max_drawdown_pct,
+            min_peak_pnl_for_drawdown=self.config.risk.min_peak_pnl_for_drawdown,
             trade_only_high_volume=self.config.risk.trade_only_high_volume,
             min_24h_volume=self.config.risk.min_24h_volume,
             whitelist=self.config.risk.whitelist,
@@ -433,12 +434,6 @@ class TradingBotWithDashboard:
                 if not metrics:
                     continue
                 self.portfolio.apply_exchange_metrics(metrics)
-                pnl = metrics.get("pnl") if isinstance(metrics.get("pnl"), dict) else {}
-                if self.risk_manager:
-                    self.risk_manager.update_pnl(
-                        realized_pnl=float(pnl.get("realized_pnl", 0.0)),
-                        unrealized_pnl=float(pnl.get("unrealized_pnl", 0.0)),
-                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:

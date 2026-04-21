@@ -124,6 +124,13 @@ class TestKillSwitch:
         order = create_order()
         assert risk_manager.check_order(order) is False
         assert risk_manager.state.kill_switch_triggered is True
+
+    def test_drawdown_ignored_until_min_peak_threshold(self, risk_manager: RiskManager):
+        risk_manager.config.min_peak_pnl_for_drawdown = 5.0
+        risk_manager.update_pnl(2.0, 0.0)
+        risk_manager.update_pnl(1.0, 0.0)
+        assert risk_manager.state.current_drawdown == 0.0
+        assert risk_manager.state.kill_switch_triggered is False
     
     def test_kill_switch_reset(self, risk_manager: RiskManager):
         """Test kill switch can be reset."""

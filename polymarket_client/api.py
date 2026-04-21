@@ -1299,6 +1299,7 @@ class PolymarketClient(BasePolymarketClient):
                 positions_map = {}
             total_realized = 0.0
             total_unrealized = 0.0
+            positions_cash_value_total = 0.0
             positions_count = 0
             markets_traded = 0
             for item in positions_map.values():
@@ -1310,7 +1311,7 @@ class PolymarketClient(BasePolymarketClient):
                 markets_traded += 1
                 positions_count += 1
                 total_realized += self._amount_value(item.get("realized"))
-                total_unrealized += self._amount_value(item.get("cashValue"))
+                positions_cash_value_total += self._amount_value(item.get("cashValue"))
 
             activities = self._extract_items(activities_payload, ("activities", "data", "results"))
             total_trades = 0
@@ -1340,11 +1341,14 @@ class PolymarketClient(BasePolymarketClient):
                 "source": "exchange_portfolio_api",
                 "pnl": {
                     "realized_pnl": total_realized,
+                    # cashValue semantics are ambiguous across docs/surfaces; keep
+                    # unrealized as local model responsibility to avoid false peaks.
                     "unrealized_pnl": total_unrealized,
                     "total_pnl": total_realized + total_unrealized,
                     "fees_paid": 0.0,
                     "net_pnl": total_realized + total_unrealized,
                 },
+                "positions_cash_value": positions_cash_value_total,
                 "balances": {
                     "current_balance": self._amount_value(primary_balance.get("currentBalance")),
                     "buying_power": self._amount_value(primary_balance.get("buyingPower")),

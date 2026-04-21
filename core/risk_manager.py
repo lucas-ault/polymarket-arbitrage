@@ -26,6 +26,7 @@ class RiskConfig:
     # Loss limits
     max_daily_loss: float = 500.0
     max_drawdown_pct: float = 0.10  # 10% max drawdown from peak
+    min_peak_pnl_for_drawdown: float = 1.0  # Ignore drawdown until peak exceeds this
     
     # Market filters
     trade_only_high_volume: bool = True
@@ -194,7 +195,7 @@ class RiskManager:
         if total_pnl > self.state.peak_pnl:
             self.state.peak_pnl = total_pnl
         
-        if self.state.peak_pnl > 0:
+        if self.state.peak_pnl > max(0.0, self.config.min_peak_pnl_for_drawdown):
             self.state.current_drawdown = (self.state.peak_pnl - total_pnl) / self.state.peak_pnl
         else:
             self.state.current_drawdown = 0.0

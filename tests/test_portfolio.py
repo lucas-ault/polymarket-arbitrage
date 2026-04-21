@@ -295,5 +295,5 @@ class TestPortfolioSummary:
         assert summary["total_exposure"] == 42.0
         assert summary["total_trades"] == 8
         assert summary["win_rate"] == 0.625
-        assert summary["pnl"]["total_pnl"] == 7.5
+        assert summary["exchange_pnl"]["total_proxy"] == 7.5
 

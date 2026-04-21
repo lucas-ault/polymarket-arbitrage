@@ -198,8 +198,9 @@ async def test_get_portfolio_metrics_combines_positions_activities_and_balances(
     metrics = await client.get_portfolio_metrics(activity_limit=50)
 
     assert metrics["pnl"]["realized_pnl"] == 2.0
-    assert metrics["pnl"]["unrealized_pnl"] == 1.25
-    assert metrics["pnl"]["total_pnl"] == 3.25
+    assert metrics["pnl"]["unrealized_pnl"] == 0.0
+    assert metrics["pnl"]["total_pnl"] == 2.0
+    assert metrics["positions_cash_value"] == 1.25
     assert metrics["balances"]["current_balance"] == 250.0
     assert metrics["total_exposure"] == 80.0
     assert metrics["total_trades"] == 2

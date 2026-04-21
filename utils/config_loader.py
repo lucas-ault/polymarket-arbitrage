@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from dotenv import load_dotenv
 
 
 class ConfigError(Exception):
@@ -29,6 +30,10 @@ class ApiConfig:
     api_secret: str = ""
     passphrase: str = ""
     private_key: str = ""
+    clob_chain_id: int = 137
+    clob_signature_type: int = 0
+    clob_funder_address: str = ""
+    clob_api_key_nonce: Optional[int] = None
     timeout_seconds: float = 30.0
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
@@ -163,6 +168,9 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     Raises:
         ConfigError: If the config file cannot be loaded or is invalid
     """
+    # Load local environment variables from .env (if present)
+    load_dotenv(override=False)
+
     path = Path(config_path)
     
     if not path.exists():
@@ -192,6 +200,10 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         "api_secret": "POLYMARKET_API_SECRET",
         "passphrase": "POLYMARKET_PASSPHRASE",
         "private_key": "POLYMARKET_PRIVATE_KEY",
+        "clob_chain_id": "POLYMARKET_CHAIN_ID",
+        "clob_signature_type": "POLYMARKET_SIGNATURE_TYPE",
+        "clob_funder_address": "POLYMARKET_FUNDER_ADDRESS",
+        "clob_api_key_nonce": "POLYMARKET_API_KEY_NONCE",
     })
     cache_data = _apply_env_overrides(cache_data, {
         "enabled": "CACHE_ENABLED",
@@ -332,10 +344,16 @@ def _validate_config(config: BotConfig) -> None:
     
     # Live mode checks
     if config.is_live:
-        if not config.api.api_key or config.api.api_key == "YOUR_API_KEY_HERE":
-            errors.append("api.api_key is required for live trading")
         if not config.api.private_key or config.api.private_key == "YOUR_PRIVATE_KEY_HERE":
             errors.append("api.private_key is required for live trading")
+        api_fields = {
+            "api_key": config.api.api_key and config.api.api_key != "YOUR_API_KEY_HERE",
+            "api_secret": config.api.api_secret and config.api.api_secret != "YOUR_API_SECRET_HERE",
+            "passphrase": config.api.passphrase and config.api.passphrase != "YOUR_PASSPHRASE_HERE",
+        }
+        configured_count = sum(1 for ok in api_fields.values() if ok)
+        if configured_count not in (0, 3):
+            errors.append("api.api_key/api_secret/passphrase must be set together (or all omitted for auto-derive)")
     
     if errors:
         raise ConfigError("Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))

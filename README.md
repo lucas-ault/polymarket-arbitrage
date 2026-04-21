@@ -202,10 +202,19 @@ export POLYMARKET_PASSPHRASE="..."
 export POLYMARKET_PRIVATE_KEY="..."
 ```
 
+`load_config()` now auto-loads a local `.env` file if present, so you can keep
+secrets there without exporting each session.
+
+For live CLOB trading, use all L2 fields (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_PASSPHRASE`) plus `POLYMARKET_PRIVATE_KEY`.
+If you only have the private key, you can bootstrap/derive API creds with:
+
+```bash
+python create_polymarket_api_creds.py
+```
+
 Important implementation notes:
 
-- `trading.maker_fee_bps`, `trading.taker_fee_bps`, and `trading.estimated_gas_per_order` are defined in config, but the entrypoints currently instantiate `ArbEngine` without forwarding those values
-- `logging.*` exists in config, but the entrypoints currently call `setup_logging(console_level=...)` with defaults rather than the full config block
+- `api.clob_chain_id`, `api.clob_signature_type`, `api.clob_funder_address`, and `api.clob_api_key_nonce` control authenticated CLOB behavior when trading live
 - `monitoring.heartbeat_interval` is defined but not used in the runtime loop
 - real-data feed tuning now comes from `monitoring.orderbook_*` fields (batch size, concurrency, and rotation delays)
 - dashboard payload size is intentionally capped for `/ws` and `/api/state`; use `/api/markets` for full market snapshots

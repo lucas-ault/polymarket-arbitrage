@@ -7,6 +7,10 @@ api:
   api_secret: "YOUR_API_SECRET_HERE"
   passphrase: "YOUR_PASSPHRASE_HERE"
   private_key: "YOUR_PRIVATE_KEY_HERE"
+  clob_chain_id: 137
+  clob_signature_type: 0
+  clob_funder_address: ""
+  clob_api_key_nonce: null
   timeout_seconds: 30
   max_retries: 3
   retry_delay_seconds: 1

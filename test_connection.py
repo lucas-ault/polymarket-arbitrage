@@ -39,14 +39,19 @@ async def test_connection(config_path: str = "config.yaml"):
     
     # Check credentials
     if config.is_live:
-        if not config.api.api_key or config.api.api_key == "YOUR_API_KEY_HERE":
-            print("❌ API key not configured!")
-            print(f"   Edit {config_path} and add your API key")
-            return False
-        
-        if not config.api.private_key or config.api.private_key == "YOUR_WALLET_PRIVATE_KEY_HERE":
+        if not config.api.private_key or config.api.private_key in {"YOUR_WALLET_PRIVATE_KEY_HERE", "YOUR_PRIVATE_KEY_HERE"}:
             print("❌ Private key not configured!")
             print(f"   Edit {config_path} and add your wallet private key")
+            return False
+        
+        api_fields = [
+            bool(config.api.api_key and config.api.api_key != "YOUR_API_KEY_HERE"),
+            bool(config.api.api_secret and config.api.api_secret != "YOUR_API_SECRET_HERE"),
+            bool(config.api.passphrase and config.api.passphrase != "YOUR_PASSPHRASE_HERE"),
+        ]
+        if sum(1 for ok in api_fields if ok) not in (0, 3):
+            print("❌ Incomplete API credentials.")
+            print("   Set api_key + api_secret + passphrase together, or leave all empty for auto-derive.")
             return False
     
     print()
@@ -80,7 +85,12 @@ async def test_connection(config_path: str = "config.yaml"):
         gamma_url=config.api.gamma_api_url,
         api_key=config.api.api_key,
         api_secret=config.api.api_secret,
+        passphrase=config.api.passphrase,
         private_key=config.api.private_key,
+        clob_chain_id=int(config.api.clob_chain_id),
+        clob_signature_type=int(config.api.clob_signature_type),
+        clob_funder_address=config.api.clob_funder_address or None,
+        clob_api_key_nonce=config.api.clob_api_key_nonce,
         timeout=config.api.timeout_seconds,
         dry_run=config.is_dry_run,
         markets_cache_ttl_seconds=getattr(config.cache, "markets_ttl_seconds", 900),
@@ -110,16 +120,17 @@ async def test_connection(config_path: str = "config.yaml"):
         await client.disconnect()
         return False
     
-    # Test positions (requires auth)
+    # Test authenticated CLOB endpoints (L2 auth)
     if config.is_live:
         print()
         print("💼 Testing authenticated endpoints...")
         try:
-            positions = await client.get_positions()
-            print(f"✅ Auth working - {len(positions)} positions")
+            open_orders = await client.get_open_orders()
+            print(f"✅ L2 auth working - fetched {len(open_orders)} open orders")
         except Exception as e:
-            print(f"⚠️  Could not fetch positions: {e}")
-            print("   This may be normal if you have no positions yet")
+            print(f"❌ Auth test failed: {e}")
+            await client.disconnect()
+            return False
     
     await client.disconnect()
     

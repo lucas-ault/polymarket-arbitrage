@@ -283,8 +283,20 @@ class PolymarketClient(BasePolymarketClient):
             active=bool(data.get("active", True)),
             closed=bool(data.get("closed", False)),
             resolved=bool(data.get("resolved", False)),
-            volume_24h=float(data.get("volume24h") or data.get("volume_24h") or 0.0),
-            liquidity=float(data.get("liquidity") or data.get("liquidityUsd") or 0.0),
+            volume_24h=float(
+                data.get("volume24hr")
+                or data.get("volume24h")
+                or data.get("volume_24h")
+                or data.get("volumeNum")
+                or data.get("volume")
+                or 0.0
+            ),
+            liquidity=float(
+                data.get("liquidityNum")
+                or data.get("liquidity")
+                or data.get("liquidityUsd")
+                or 0.0
+            ),
             category=str(data.get("category") or ""),
         )
         return market

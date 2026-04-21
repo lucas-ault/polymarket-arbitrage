@@ -134,13 +134,26 @@ class DataFeed:
             if not self.market_ids:
                 # Discover markets if none specified - list_markets returns full Market objects!
                 markets = await self.client.list_markets({"active": True})
-                
+
+                # Prefer liquid/active markets first so price feeds are meaningful.
+                liquid_markets = [
+                    market for market in markets
+                    if (market.volume_24h > 0) or (market.liquidity > 0)
+                ]
+                selected_markets = liquid_markets if liquid_markets else markets
+                selected_markets = selected_markets[:200]
+
                 # Store markets directly from the list - no need to re-fetch!
-                for market in markets:
+                for market in selected_markets:
                     self._markets[market.market_id] = market
-                
-                self.market_ids = [m.market_id for m in markets]
-                logger.info(f"Discovered and loaded {len(self.market_ids)} active markets (no re-fetch needed!)")
+
+                self.market_ids = [m.market_id for m in selected_markets]
+                logger.info(
+                    "Discovered %s markets (%s liquid); monitoring %s",
+                    len(markets),
+                    len(liquid_markets),
+                    len(self.market_ids),
+                )
             else:
                 # Only fetch if specific market_ids were provided
                 for market_id in self.market_ids:

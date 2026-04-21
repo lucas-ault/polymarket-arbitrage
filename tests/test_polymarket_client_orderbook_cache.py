@@ -55,9 +55,11 @@ async def test_cancel_order_uses_sdk_signature_with_required_params():
 
     client._request = _unexpected_request  # type: ignore[method-assign]
 
-    await client.cancel_order("abc123")
+    await client.cancel_order("abc123", market_slug="election-2026")
 
-    assert client._sdk_client.orders.calls == [("abc123", {})]
+    assert client._sdk_client.orders.calls == [
+        ("abc123", {"symbol": "election-2026"})
+    ]
 
 
 @pytest.mark.asyncio
@@ -77,15 +79,17 @@ async def test_cancel_order_falls_back_to_rest_when_sdk_cancel_fails():
     async def _fake_request(method, endpoint, params=None, json_data=None, use_private=False):
         captured["method"] = method
         captured["endpoint"] = endpoint
+        captured["json_data"] = json_data
         captured["use_private"] = use_private
         return {}
 
     client._request = _fake_request  # type: ignore[method-assign]
 
-    await client.cancel_order("xyz789")
+    await client.cancel_order("xyz789", market_slug="sports-foo")
 
     assert captured == {
         "method": "POST",
         "endpoint": "/v1/order/xyz789/cancel",
+        "json_data": {"marketSlug": "sports-foo"},
         "use_private": True,
     }

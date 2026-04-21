@@ -391,7 +391,11 @@ class ExecutionEngine:
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a specific order."""
         try:
-            await self.client.cancel_order(order_id)
+            tracked_order = self._open_orders.get(order_id)
+            market_slug = None
+            if tracked_order:
+                market_slug = tracked_order.market_slug or tracked_order.market_id
+            await self.client.cancel_order(order_id, market_slug=market_slug)
             self._untrack_order(order_id)
             self.stats.orders_cancelled += 1
             logger.info(f"Order cancelled: {order_id}")

@@ -89,7 +89,7 @@ class BasePolymarketClient(ABC):
         pass
 
     @abstractmethod
-    async def cancel_order(self, order_id: str) -> None:
+    async def cancel_order(self, order_id: str, market_slug: Optional[str] = None) -> None:
         pass
 
     @abstractmethod
@@ -937,22 +937,35 @@ class PolymarketClient(BasePolymarketClient):
             order.status = OrderStatus.REJECTED
             raise
 
-    async def cancel_order(self, order_id: str) -> None:
+    async def cancel_order(self, order_id: str, market_slug: Optional[str] = None) -> None:
         if self.dry_run:
             if order_id in self._simulated_orders:
                 self._simulated_orders[order_id].status = OrderStatus.CANCELLED
             return
+        resolved_slug = (market_slug or "").strip()
+        if not resolved_slug:
+            maybe_order = await self._lookup_open_order(order_id)
+            if maybe_order:
+                resolved_slug = (maybe_order.market_slug or maybe_order.market_id or "").strip()
         if self._sdk_client:
             sdk_cancel = self._sdk_client.orders.cancel
             sdk_errors: list[Exception] = []
             # Support SDK variants where cancel expects either:
             #   cancel(order_id) OR cancel(order_id, params)
-            cancel_arg_variants: tuple[tuple[Any, ...], ...] = (
-                (order_id,),
-                (order_id, {}),
-                (order_id, {"orderId": order_id}),
-                (order_id, {"order_id": order_id}),
-                (order_id, {"id": order_id}),
+            cancel_arg_variants: list[tuple[Any, ...]] = []
+            if resolved_slug:
+                cancel_arg_variants.extend(
+                    [
+                        (order_id, {"symbol": resolved_slug}),
+                        (order_id, {"marketSlug": resolved_slug}),
+                        (order_id, {"symbol": resolved_slug, "marketSlug": resolved_slug}),
+                    ]
+                )
+            cancel_arg_variants.extend(
+                [
+                    (order_id,),
+                    (order_id, {}),
+                ]
             )
             for args in cancel_arg_variants:
                 try:
@@ -962,22 +975,58 @@ class PolymarketClient(BasePolymarketClient):
                     sdk_errors.append(exc)
             if sdk_errors:
                 logger.warning(
-                    "SDK order cancel failed for %s; falling back to REST cancel: %s",
+                    "SDK order cancel failed for %s (slug=%s); falling back to REST cancel: %s",
                     order_id,
+                    resolved_slug or "<missing>",
                     sdk_errors[-1],
                 )
-        await self._request("POST", f"/v1/order/{order_id}/cancel", use_private=True)
+        rest_bodies: list[dict[str, Any]] = []
+        if resolved_slug:
+            rest_bodies.extend(
+                [
+                    {"marketSlug": resolved_slug},
+                    {"symbol": resolved_slug},
+                    {"marketSlug": resolved_slug, "symbol": resolved_slug},
+                ]
+            )
+        else:
+            rest_bodies.append({})
+        last_rest_error: Optional[Exception] = None
+        for body in rest_bodies:
+            try:
+                await self._request(
+                    "POST",
+                    f"/v1/order/{order_id}/cancel",
+                    json_data=body,
+                    use_private=True,
+                )
+                return
+            except Exception as exc:
+                last_rest_error = exc
+        if last_rest_error:
+            raise last_rest_error
 
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
         orders = await self.get_open_orders(market_id)
         cancelled = 0
         for order in orders:
             try:
-                await self.cancel_order(order.order_id)
+                await self.cancel_order(order.order_id, market_slug=order.market_slug)
                 cancelled += 1
             except Exception as exc:
                 logger.warning("Failed to cancel order %s: %s", order.order_id, exc)
         return cancelled
+
+    async def _lookup_open_order(self, order_id: str) -> Optional[Order]:
+        """Best-effort lookup for market slug when only order ID is known."""
+        try:
+            open_orders = await self.get_open_orders()
+        except Exception:
+            return None
+        for order in open_orders:
+            if order.order_id == order_id:
+                return order
+        return None
 
     def _parse_order_status(self, raw_status: Optional[str]) -> OrderStatus:
         status = (raw_status or "").lower().replace("order_state_", "")

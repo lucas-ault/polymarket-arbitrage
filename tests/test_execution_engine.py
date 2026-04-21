@@ -7,7 +7,7 @@ import pytest
 from core.execution import ExecutionConfig, ExecutionEngine
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
-from polymarket_client.models import Signal
+from polymarket_client.models import Order, OrderSide, Signal, TokenType
 
 
 class DummyClient:
@@ -50,3 +50,36 @@ async def test_submit_signal_tracks_queue_depth():
 
     assert engine.signal_queue_size == 2
     assert engine.stats.max_signal_queue_depth == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_order_passes_market_slug_for_live_cancel():
+    class CapturingClient(DummyClient):
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def cancel_order(self, order_id, market_slug=None):
+            self.calls.append((order_id, market_slug))
+            return None
+
+    client = CapturingClient()
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=RiskManager(RiskConfig(trade_only_high_volume=False)),
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    engine._open_orders["ord-1"] = Order(
+        order_id="ord-1",
+        market_id="m-1",
+        market_slug="slug-1",
+        token_type=TokenType.YES,
+        side=OrderSide.BUY,
+        price=0.5,
+        size=1.0,
+    )
+
+    cancelled = await engine.cancel_order("ord-1")
+
+    assert cancelled is True
+    assert client.calls == [("ord-1", "slug-1")]

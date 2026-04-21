@@ -115,7 +115,7 @@ class MonitoringConfig:
 @dataclass
 class CacheConfig:
     """Optional cache configuration."""
-    enabled: bool = False
+    enabled: bool = True
     backend: str = "redis"
     redis_url: str = "redis://localhost:6379/0"
     key_prefix: str = "pmarb"

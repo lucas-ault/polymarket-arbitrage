@@ -136,6 +136,9 @@ class TradingBotWithDashboard:
             # Initialize cross-platform arbitrage engine
             self.cross_platform_engine = CrossPlatformArbEngine(
                 min_edge=self.config.trading.min_edge,
+                polymarket_taker_fee=self.config.trading.taker_fee_bps / 10000,
+                kalshi_taker_fee=self.config.trading.taker_fee_bps / 10000,
+                gas_cost=self.config.trading.estimated_gas_per_order,
                 match_min_similarity=self.config.mode.min_match_similarity,
             )
             self.market_matcher = self.cross_platform_engine.matcher
@@ -187,6 +190,9 @@ class TradingBotWithDashboard:
             default_order_size=self.config.trading.default_order_size,
             min_order_size=self.config.trading.min_order_size,
             max_order_size=self.config.trading.max_order_size,
+            maker_fee_bps=self.config.trading.maker_fee_bps,
+            taker_fee_bps=self.config.trading.taker_fee_bps,
+            gas_cost_per_order=self.config.trading.estimated_gas_per_order,
         ))
         
         # Initialize data feed
@@ -449,12 +455,24 @@ class TradingBotWithDashboard:
         payload = await self.cache_store.get_json(MATCHES_CACHE_KEY)
         if not payload or payload.get("schema_version") != MATCHES_CACHE_SCHEMA_VERSION:
             return
-        if float(payload.get("min_similarity", self.config.mode.min_match_similarity)) != float(
-            self.config.mode.min_match_similarity
-        ):
-            return
+        target_similarity = float(self.config.mode.min_match_similarity)
+        cached_similarity = float(payload.get("min_similarity", target_similarity))
+        cached_pairs = payload.get("pairs", [])
+        if cached_similarity < target_similarity:
+            # Reuse older cache safely by keeping only pairs that satisfy the
+            # stricter current threshold.
+            cached_pairs = [
+                pair for pair in cached_pairs
+                if float(pair.get("similarity_score", 0.0)) >= target_similarity
+            ]
+            logger.info(
+                "Filtered cached matches from min_similarity=%s to %s (%s remaining)",
+                cached_similarity,
+                target_similarity,
+                len(cached_pairs),
+            )
         try:
-            loaded = self.market_matcher.import_cached_pairs(payload.get("pairs", []))
+            loaded = self.market_matcher.import_cached_pairs(cached_pairs)
         except Exception as exc:
             logger.warning("Failed to import cached matches: %s", exc)
             return

@@ -14,27 +14,27 @@ api:
 trading:
   # Empty list means full auto-discovery from Gamma.
   markets: []
-  min_edge: 0.01
+  min_edge: 0.025
   bundle_arb_enabled: true
-  min_spread: 0.05
+  min_spread: 0.07
   tick_size: 0.01
-  mm_enabled: false
-  default_order_size: 5
+  mm_enabled: true
+  default_order_size: 3
   min_order_size: 2
-  max_order_size: 10
-  slippage_tolerance: 0.02
+  max_order_size: 6
+  slippage_tolerance: 0.01
   order_timeout_seconds: 60
   maker_fee_bps: 0
   taker_fee_bps: 150
   estimated_gas_per_order: 0.02
 
 risk:
-  max_position_per_market: 15
+  max_position_per_market: 10
   max_global_exposure: 50
-  max_daily_loss: 10
+  max_daily_loss: 6
   max_drawdown_pct: 0.15
-  trade_only_high_volume: false
-  min_24h_volume: 10000
+  trade_only_high_volume: true
+  min_24h_volume: 50000
   whitelist: []
   blacklist: []
   kill_switch_enabled: true
@@ -45,7 +45,7 @@ mode:
   data_mode: "real"
   cross_platform_enabled: true
   kalshi_enabled: true
-  min_match_similarity: 0.65
+  min_match_similarity: 0.78
   cross_platform_match_start_delay_seconds: 5.0
   cross_platform_match_process_workers: 3
   cross_platform_candidate_limit: 220
@@ -68,7 +68,7 @@ monitoring:
   heartbeat_interval: 30
   track_latency: true
   track_fill_rates: true
-  orderbook_active_batch_size: 450
+  orderbook_active_batch_size: 300
   orderbook_request_batch_size: 20
   orderbook_fetch_concurrency: 16
   orderbook_request_delay_seconds: 0.0

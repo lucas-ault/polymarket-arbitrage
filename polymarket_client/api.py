@@ -478,10 +478,10 @@ class PolymarketClient(BasePolymarketClient):
                 books = await asyncio.gather(*(self.get_orderbook(market_id) for market_id in group), return_exceptions=True)
                 for market_id, book in zip(group, books):
                     if isinstance(book, Exception):
-                        logger.debug("Orderbook polling error for %s: %s", market_id, book)
+                        logger.warning("Orderbook polling error for %s: %s", market_id, book)
                         continue
                     self._runtime_stats["orderbook_updates_emitted"] += 1
-                    yield market_id, book
+                    yield book.market_id, book
                 if batch_delay:
                     await asyncio.sleep(batch_delay)
             offset += active_batch_size
@@ -490,7 +490,12 @@ class PolymarketClient(BasePolymarketClient):
                 self._runtime_stats["orderbook_rotations"] += 1
             await asyncio.sleep(rotation_delay)
 
-    async def _stream_orderbooks_ws(self, market_ids: list[str], rotation_delay: float) -> AsyncIterator[tuple[str, OrderBook]]:
+    async def _stream_orderbooks_ws(
+        self,
+        market_slugs: list[str],
+        slug_to_market_id: dict[str, str],
+        rotation_delay: float,
+    ) -> AsyncIterator[tuple[str, OrderBook]]:
         while True:
             try:
                 headers = self._auth_headers("GET", "/v1/ws/markets")
@@ -505,12 +510,12 @@ class PolymarketClient(BasePolymarketClient):
                         "subscribe": {
                             "request_id": request_id,
                             "subscription_type": 2,
-                            "market_slugs": market_ids,
+                            "market_slugs": market_slugs,
                         }
                     }
                     await ws.send(json.dumps(subscribe_msg))
                     while True:
-                        raw = await ws.recv()
+                        raw = await asyncio.wait_for(ws.recv(), timeout=max(8.0, rotation_delay * 6))
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8", errors="ignore")
                         payload = json.loads(raw)
@@ -526,8 +531,7 @@ class PolymarketClient(BasePolymarketClient):
                         market_slug = str(data.get("market_slug") or data.get("slug") or "")
                         if not market_slug:
                             continue
-                        market = self._markets_by_slug.get(market_slug)
-                        market_id = market.market_id if market else market_slug
+                        market_id = slug_to_market_id.get(market_slug, market_slug)
                         yes_book = TokenOrderBook(
                             token_type=TokenType.YES,
                             bids=OrderBookSide(levels=self._parse_price_levels(data.get("yes_bids") or data.get("bids"))),
@@ -551,6 +555,12 @@ class PolymarketClient(BasePolymarketClient):
             except ConnectionClosed:
                 self._runtime_stats["ws_reconnects"] += 1
                 await asyncio.sleep(max(0.5, rotation_delay))
+            except asyncio.TimeoutError:
+                logger.warning("Markets websocket connected but received no data; falling back to REST polling")
+                self._runtime_stats["ws_reconnects"] += 1
+                if self.use_rest_fallback:
+                    break
+                await asyncio.sleep(max(0.5, rotation_delay))
             except Exception as exc:
                 logger.warning("Markets websocket stream failure: %s", exc)
                 self._runtime_stats["ws_reconnects"] += 1
@@ -558,6 +568,30 @@ class PolymarketClient(BasePolymarketClient):
                     await asyncio.sleep(max(0.5, rotation_delay))
                 else:
                     break
+
+    async def _resolve_market_targets(self, targets: list[str]) -> tuple[list[str], dict[str, str]]:
+        """Resolve requested targets to market slugs and slug->market_id mapping."""
+        if not targets:
+            markets = await self.list_markets({"active": True, "limit": 200})
+            targets = [market.market_id for market in markets]
+
+        slugs: list[str] = []
+        slug_to_market_id: dict[str, str] = {}
+        for target in targets:
+            market = self._markets_cache.get(target) or self._markets_by_slug.get(target)
+            if not market:
+                try:
+                    market = await self.get_market(target)
+                except Exception:
+                    continue
+            slug = (market.market_slug or market.market_id or target).strip()
+            if not slug:
+                continue
+            slug_to_market_id[slug] = market.market_id
+            slugs.append(slug)
+        # De-duplicate while preserving order.
+        slugs = list(dict.fromkeys(slugs))
+        return slugs, slug_to_market_id
 
     async def stream_orderbook(
         self,
@@ -577,14 +611,19 @@ class PolymarketClient(BasePolymarketClient):
             return
 
         targets = market_ids.copy()
-        if not targets:
-            markets = await self.list_markets({"active": True, "limit": 200})
-            targets = [m.market_slug or m.market_id for m in markets]
+        resolved_slugs, slug_to_market_id = await self._resolve_market_targets(targets)
+        if not resolved_slugs:
+            logger.warning("No valid market targets resolved for orderbook stream")
+            return
 
         if self.use_websocket and self.key_id and self.secret_key:
             ws_failed = False
             try:
-                async for item in self._stream_orderbooks_ws(targets, rotation_delay):
+                async for item in self._stream_orderbooks_ws(
+                    resolved_slugs,
+                    slug_to_market_id,
+                    rotation_delay,
+                ):
                     yield item
             except Exception:
                 ws_failed = True
@@ -592,7 +631,7 @@ class PolymarketClient(BasePolymarketClient):
                 return
 
         async for item in self._stream_orderbooks_polling(
-            targets,
+            resolved_slugs,
             active_batch_size=active_batch_size,
             markets_per_request_batch=markets_per_request_batch,
             batch_delay=batch_delay,

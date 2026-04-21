@@ -10,6 +10,7 @@ result sets when strict returns < 50, giving bundle-arb something to chew on.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
@@ -18,18 +19,28 @@ from core.data_feed import DataFeed
 from polymarket_client.models import Market
 
 
-def _market(market_id: str, *, liquidity: float = 0.0, volume_24h: float = 0.0) -> Market:
+def _market(
+    market_id: str,
+    *,
+    question: Optional[str] = None,
+    liquidity: float = 0.0,
+    volume_24h: float = 0.0,
+    best_bid: float = 0.45,
+    best_ask: float = 0.55,
+    yes_price: float = 0.50,
+    no_price: float = 0.50,
+) -> Market:
     return Market(
         market_id=market_id,
         condition_id=market_id,
-        question=f"Question {market_id}?",
+        question=question or f"Question {market_id}?",
         market_slug=market_id,
         liquidity=liquidity,
         volume_24h=volume_24h,
-        best_bid=0.45,
-        best_ask=0.55,
-        yes_price=0.50,
-        no_price=0.50,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        yes_price=yes_price,
+        no_price=no_price,
     )
 
 
@@ -99,3 +110,93 @@ async def test_discovery_falls_back_when_strict_returns_zero():
     # Two calls: strict (empty) then loose top-up that supplies everything.
     assert len(client.calls) == 2
     assert "loose-1" in feed._markets
+
+
+@pytest.mark.asyncio
+async def test_discovery_diversifies_across_question_buckets():
+    repeated = [
+        _market(
+            f"mvp-{i}",
+            question="NBA MVP",
+            liquidity=1000.0,
+            volume_24h=1000.0,
+            best_bid=0.95,
+            best_ask=0.96,
+            yes_price=0.955,
+            no_price=0.045,
+        )
+        for i in range(205)
+    ]
+    uniques = [
+        _market(
+            f"game-{i}",
+            question=f"Game {i}",
+            liquidity=500.0,
+            volume_24h=500.0,
+            best_bid=0.49,
+            best_ask=0.53,
+            yes_price=0.51,
+            no_price=0.49,
+        )
+        for i in range(20)
+    ]
+    client = _StubClient(strict=repeated + uniques, loose=[])
+    feed = DataFeed(client=client, market_ids=[])
+
+    await feed._fetch_markets()
+
+    selected_questions = {market.question for market in feed._markets.values()}
+    assert "NBA MVP" in selected_questions
+    assert any(question.startswith("Game ") for question in selected_questions)
+    assert len(selected_questions) > 1, "selection should not collapse to one repeated event"
+    assert len(feed.market_ids) == 200
+
+
+@pytest.mark.asyncio
+async def test_discovery_prefers_mm_friendly_markets_when_trimming_to_200():
+    extreme = [
+        _market(
+            f"extreme-{i}",
+            question=f"Extreme {i}",
+            liquidity=500.0,
+            volume_24h=500.0,
+            best_bid=0.97,
+            best_ask=0.98,
+            yes_price=0.975,
+            no_price=0.025,
+        )
+        for i in range(220)
+    ]
+    balanced = [
+        _market(
+            f"balanced-{i}",
+            question=f"Balanced {i}",
+            liquidity=400.0,
+            volume_24h=400.0,
+            best_bid=0.48,
+            best_ask=0.52,
+            yes_price=0.50,
+            no_price=0.50,
+        )
+        for i in range(5)
+    ]
+
+    client = _StubClient(strict=extreme + balanced, loose=[])
+    feed = DataFeed(
+        client=client,
+        market_ids=[],
+        config=SimpleNamespace(
+            trading=SimpleNamespace(
+                mm_enabled=True,
+                mm_min_price=0.12,
+                mm_max_price=0.88,
+                min_spread=0.01,
+                mm_max_spread=0.18,
+            )
+        ),
+    )
+
+    await feed._fetch_markets()
+
+    assert all(f"balanced-{i}" in feed._markets for i in range(5))
+    assert len(feed.market_ids) == 200

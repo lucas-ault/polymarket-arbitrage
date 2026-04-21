@@ -8,6 +8,7 @@ for all monitored markets.
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Callable, Optional
@@ -177,6 +178,121 @@ class DataFeed:
                 raise
             except Exception as exc:
                 logger.warning("Market discovery refresh failed: %s", exc)
+
+    def _discovery_bucket_key(self, market: Market) -> str:
+        """Group similar markets so one event family can't monopolize all 200 slots."""
+        key = (market.question or market.market_slug or market.market_id).strip().lower()
+        key = " ".join(key.split())
+        return key or market.market_slug or market.market_id
+
+    def _market_reference_price(self, market: Market) -> Optional[float]:
+        """Best-effort midpoint for discovery-time ranking."""
+        if market.best_bid > 0 and market.best_ask > 0 and market.best_ask >= market.best_bid:
+            return (market.best_bid + market.best_ask) / 2.0
+        if market.yes_price > 0:
+            return market.yes_price
+        if market.no_price > 0:
+            return max(0.0, min(1.0, 1.0 - market.no_price))
+        return None
+
+    def _market_reference_spread(self, market: Market) -> Optional[float]:
+        if market.best_bid > 0 and market.best_ask > 0 and market.best_ask >= market.best_bid:
+            return market.best_ask - market.best_bid
+        return None
+
+    def _is_mm_friendly_market(self, market: Market) -> bool:
+        """Approximate whether a market is likely to pass MM gates before full books load."""
+        trading_cfg = getattr(self.config, "trading", None)
+        if trading_cfg is None or not getattr(trading_cfg, "mm_enabled", False):
+            return False
+
+        midpoint = self._market_reference_price(market)
+        spread = self._market_reference_spread(market)
+        if midpoint is None or spread is None:
+            return False
+
+        min_price = float(getattr(trading_cfg, "mm_min_price", 0.0))
+        max_price = float(getattr(trading_cfg, "mm_max_price", 1.0))
+        min_spread = float(getattr(trading_cfg, "min_spread", 0.0))
+        max_spread = float(getattr(trading_cfg, "mm_max_spread", 1.0))
+
+        if midpoint < min_price or midpoint > max_price:
+            return False
+        if spread < min_spread:
+            return False
+        if max_spread > 0 and spread > max_spread:
+            return False
+        return True
+
+    def _market_discovery_score(self, market: Market) -> float:
+        """Prefer liquid, quoted, mid-price markets that are more likely MM-usable."""
+        score = math.log1p(max(float(market.liquidity), 0.0))
+        score += 0.5 * math.log1p(max(float(market.volume_24h), 0.0))
+
+        if market.best_bid > 0:
+            score += 1.0
+        if market.best_ask > 0:
+            score += 1.0
+
+        midpoint = self._market_reference_price(market)
+        if midpoint is not None:
+            # Favor balanced markets over long-tail 1c / 99c futures.
+            score += max(0.0, 1.0 - abs(midpoint - 0.5) * 2.0) * 4.0
+
+        spread = self._market_reference_spread(market)
+        if spread is not None:
+            if self._is_mm_friendly_market(market):
+                score += 4.0
+            elif spread > 0.20:
+                score -= 2.0
+
+        return score
+
+    def _select_discovered_markets(
+        self,
+        markets: list[Market],
+        *,
+        limit: int,
+    ) -> list[Market]:
+        """Round-robin across event/question buckets so we use all 200 slots better."""
+        buckets: dict[str, list[Market]] = {}
+        for market in markets:
+            buckets.setdefault(self._discovery_bucket_key(market), []).append(market)
+
+        for bucket_markets in buckets.values():
+            bucket_markets.sort(key=self._market_discovery_score, reverse=True)
+
+        ordered_buckets = sorted(
+            buckets.values(),
+            key=lambda items: self._market_discovery_score(items[0]) if items else float("-inf"),
+            reverse=True,
+        )
+
+        selected: list[Market] = []
+        seen: set[str] = set()
+        while len(selected) < limit:
+            progress = False
+            for bucket_markets in ordered_buckets:
+                if len(selected) >= limit:
+                    break
+                if not bucket_markets:
+                    continue
+                market = bucket_markets.pop(0)
+                if market.market_id in seen:
+                    continue
+                selected.append(market)
+                seen.add(market.market_id)
+                progress = True
+
+            if not progress:
+                break
+
+            ordered_buckets.sort(
+                key=lambda items: self._market_discovery_score(items[0]) if items else float("-inf"),
+                reverse=True,
+            )
+
+        return selected
     
     async def _fetch_markets(self) -> None:
         """Fetch market information for all monitored markets."""
@@ -238,8 +354,16 @@ class DataFeed:
                         or (market.no_price > 0)
                     )
                 ]
-                selected_markets = liquid_markets if liquid_markets else markets
-                selected_markets = selected_markets[:200]
+                selected_markets = self._select_discovered_markets(
+                    liquid_markets if liquid_markets else markets,
+                    limit=200,
+                )
+                mm_friendly_selected = sum(
+                    1 for market in selected_markets if self._is_mm_friendly_market(market)
+                )
+                unique_buckets = len(
+                    {self._discovery_bucket_key(market) for market in selected_markets}
+                )
 
                 # Store markets directly from the list - no need to re-fetch!
                 for market in selected_markets:
@@ -247,10 +371,13 @@ class DataFeed:
 
                 self.market_ids = [m.market_id for m in selected_markets]
                 logger.info(
-                    "Discovered %s markets (%s liquid); monitoring %s",
+                    "Discovered %s markets (%s liquid); monitoring %s across %s buckets "
+                    "(%s MM-friendly by metadata)",
                     len(markets),
                     len(liquid_markets),
                     len(self.market_ids),
+                    unique_buckets,
+                    mm_friendly_selected,
                 )
             else:
                 # Only fetch if specific market_ids were provided

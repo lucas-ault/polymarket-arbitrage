@@ -70,6 +70,8 @@ def _build_arb_engine(config: BotConfig) -> ArbEngine:
         bundle_arb_enabled=config.trading.bundle_arb_enabled,
         min_spread=config.trading.min_spread,
         mm_max_spread=config.trading.mm_max_spread,
+        mm_min_price=config.trading.mm_min_price,
+        mm_max_price=config.trading.mm_max_price,
         mm_cooldown_seconds=config.trading.mm_cooldown_seconds,
         mm_enabled=config.trading.mm_enabled,
         tick_size=config.trading.tick_size,
@@ -155,7 +157,50 @@ async def bootstrap_components(
             logger.error("Auto-unwind cancel_all_orders failed: %s", exc)
     risk_manager.set_kill_switch_callback(_on_kill_switch)
 
+    # Seed risk manager AND portfolio with positions already on the exchange.
+    # Without this, `max_position_per_market` is enforced only WITHIN a single
+    # bot session — every restart silently doubles the headroom (this let
+    # real losses accumulate to ~7x the configured cap). Skip in dry-run
+    # because `get_positions()` returns the simulator's state which is
+    # already empty for a fresh process.
+    if config.is_live:
+        try:
+            existing = await client.get_positions()
+            seeded = 0
+            for market_id, by_token in (existing or {}).items():
+                for token_type, position in (by_token or {}).items():
+                    size = float(getattr(position, "size", 0.0) or 0.0)
+                    if size == 0:
+                        continue
+                    avg_price = float(getattr(position, "avg_entry_price", 0.0) or 0.0)
+                    risk_manager.update_position(market_id, token_type, size, avg_price)
+                    portfolio.seed_position(market_id, token_type, size, avg_price)
+                    seeded += 1
+            logger.info(
+                "Seeded %d existing exchange position(s) into risk manager + "
+                "portfolio; per-market cap and inventory-aware MM are now "
+                "enforced across restarts",
+                seeded,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not load existing positions for seeding: %s. "
+                "Per-market cap and inventory check will only see fills "
+                "observed in this session.",
+                exc,
+            )
+
     arb_engine = _build_arb_engine(config)
+
+    # Inventory-aware MM: route current per-leg contract count from the
+    # portfolio into the arb engine so we don't keep adding to a side that
+    # already has fills against us.
+    def _position_probe(market_id, token_type) -> float:
+        position = portfolio.get_position(market_id, token_type)
+        if position is None:
+            return 0.0
+        return abs(float(getattr(position, "size", 0.0) or 0.0))
+    arb_engine.set_position_probe(_position_probe)
 
     if position_refresh_interval is None:
         position_refresh_interval = 30.0 if config.is_live else 5.0

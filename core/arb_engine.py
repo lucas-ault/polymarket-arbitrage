@@ -41,6 +41,13 @@ class ArbConfig:
     # indicate no real liquidity (a single resting quote on each side); MM
     # there just spams orders that never fill. 1.0 disables the cap.
     mm_max_spread: float = 1.0
+    # Skip MM at extreme prices. In long-tail event markets (price < 0.10 or
+    # > 0.90), passive bids are overwhelmingly hit by informed sellers who
+    # know the outcome is becoming less likely. Every fill is adverse and
+    # inventory accumulates at prices that are about to move to zero (or 1).
+    # Defaults restrict MM to the 10-90c band; 0.0/1.0 disables.
+    mm_min_price: float = 0.10
+    mm_max_price: float = 0.90
     # Cooldown before re-emitting an MM signal for the same (market, token).
     mm_cooldown_seconds: float = 5.0
     mm_enabled: bool = True
@@ -112,16 +119,32 @@ class ArbEngine:
     def __init__(self, config: ArbConfig):
         self.config = config
         self.stats = ArbStats()
-        
+
         # Track recent opportunities to avoid duplicates
         self._recent_opportunities: dict[str, Opportunity] = {}
         self._opportunity_cooldown: dict[str, datetime] = {}
-        
+
         # Track active opportunities for duration measurement
         self._active_opportunities: dict[str, OpportunityTiming] = {}
         self._opportunity_history: list[OpportunityTiming] = []
-        
+
+        # Optional inventory probe. When set, MM is suppressed on (market,
+        # token_type) pairs we already have positions in. Wired by bootstrap
+        # from the live Portfolio so the bot doesn't pile on a losing side.
+        # Signature: (market_id: str, token_type: TokenType) -> float.
+        # Should return current absolute position size (contracts) on that leg.
+        self._position_probe = None
+
         logger.info(f"ArbEngine initialized with min_edge={config.min_edge}, min_spread={config.min_spread}")
+
+    def set_position_probe(self, probe) -> None:
+        """Register a callback that returns current contract count on a leg.
+
+        ArbEngine uses this to skip MM on legs we already hold inventory in,
+        which is the single biggest mitigation against adverse-selection
+        accumulation in event-futures markets.
+        """
+        self._position_probe = probe
     
     def analyze(self, market_state: MarketState) -> list[Signal]:
         """
@@ -516,6 +539,24 @@ class ArbEngine:
         # fill and racks up "market not found" / cancel churn.
         if self.config.mm_max_spread > 0 and spread > self.config.mm_max_spread:
             return None
+
+        # Skip extreme-price markets (long-tail / near-resolution). Adverse
+        # selection at the tails has historically generated catastrophic
+        # losses on event futures (e.g. NHL Cup futures bought at 5-20%).
+        midpoint = (best_bid + best_ask) / 2.0
+        if midpoint < self.config.mm_min_price or midpoint > self.config.mm_max_price:
+            return None
+
+        # Inventory check: if we already hold this leg, don't keep buying it.
+        # The cap is one contract (size 1) for live; any existing position
+        # means we've already absorbed adverse fills on this leg.
+        if self._position_probe is not None:
+            try:
+                existing = float(self._position_probe(market_id, token_type) or 0.0)
+            except Exception:  # noqa: BLE001
+                existing = 0.0
+            if abs(existing) > 0:
+                return None
 
         # Check cooldown
         cooldown_key = f"mm_{market_id}_{token_type.value}"

@@ -50,6 +50,14 @@ class TradingConfig:
     # liquidity (single resting quotes) and quoting into them just spams the
     # book without filling. Default 1.0 disables the cap.
     mm_max_spread: float = 1.0
+    # Skip market-making at extreme prices. In long-tail event markets (low
+    # YES probability), the bid is overwhelmingly hit by *informed* sellers
+    # who know the outcome is becoming less likely — every fill is loaded
+    # against you (adverse selection) and you accumulate inventory at prices
+    # that are about to move toward zero. Symmetric on the high side.
+    # Defaults: only quote in 0.10-0.90. Set to 0.0 / 1.0 to disable.
+    mm_min_price: float = 0.10
+    mm_max_price: float = 0.90
     # How long to suppress repeat MM signals on the same (market, token).
     mm_cooldown_seconds: float = 5.0
     default_order_size: float = 50.0

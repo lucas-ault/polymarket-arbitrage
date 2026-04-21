@@ -377,3 +377,28 @@ class Portfolio:
         """Attach exchange-reported portfolio metrics for summary display."""
         self._exchange_metrics = metrics.copy() if isinstance(metrics, dict) else None
 
+    def seed_position(
+        self,
+        market_id: str,
+        token_type: TokenType,
+        size: float,
+        avg_entry_price: float,
+    ) -> None:
+        """Seed an existing exchange position into the portfolio.
+
+        Used at startup so per-market caps and inventory-aware logic see real
+        exposure instead of treating each restart as a fresh book. This bypasses
+        the trade-history machinery on purpose — the trades happened in earlier
+        sessions and shouldn't be counted toward fees / win-rate again.
+        """
+        if size == 0:
+            return
+        bucket = self._positions.setdefault(market_id, {})
+        position = bucket.get(token_type)
+        if position is None:
+            position = PortfolioPosition(market_id=market_id, token_type=token_type)
+            bucket[token_type] = position
+        position.size = float(size)
+        position.avg_entry_price = float(avg_entry_price)
+        position.cost_basis = abs(float(size)) * float(avg_entry_price)
+

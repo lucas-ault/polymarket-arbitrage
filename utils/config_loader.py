@@ -119,6 +119,7 @@ class ModeConfig:
     kalshi_enabled: bool = True  # Enable Kalshi market monitoring
     min_match_similarity: float = 0.6  # Minimum similarity score for market matching (0-1)
     cross_platform_match_start_delay_seconds: float = 0.0
+    cross_platform_refresh_interval_seconds: float = 300.0
     cross_platform_match_process_workers: int = 0  # 0 = auto
     cross_platform_candidate_limit: int = 300
     dry_run_initial_balance: float = 10000.0
@@ -144,6 +145,7 @@ class MonitoringConfig:
     """Monitoring configuration."""
     snapshot_interval: float = 60.0
     heartbeat_interval: float = 30.0
+    market_discovery_refresh_interval_seconds: float = 300.0
     # Maximum number of Polymarket markets to monitor. 0 means "no cap" and
     # keeps every discovered market active in the rotation.
     max_monitored_markets: int = 200
@@ -399,6 +401,8 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("mode.min_match_similarity must be between 0 and 1")
     if config.mode.cross_platform_match_start_delay_seconds < 0:
         errors.append("mode.cross_platform_match_start_delay_seconds must be non-negative")
+    if config.mode.cross_platform_refresh_interval_seconds < 0:
+        errors.append("mode.cross_platform_refresh_interval_seconds must be non-negative")
     if config.mode.cross_platform_match_process_workers < 0:
         errors.append("mode.cross_platform_match_process_workers must be non-negative")
     if config.mode.cross_platform_candidate_limit <= 0:
@@ -414,6 +418,8 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("monitoring.max_monitored_markets must be non-negative")
     if config.monitoring.dashboard_market_limit < 0:
         errors.append("monitoring.dashboard_market_limit must be non-negative")
+    if config.monitoring.market_discovery_refresh_interval_seconds < 0:
+        errors.append("monitoring.market_discovery_refresh_interval_seconds must be non-negative")
     
     # Cache validation
     if config.cache.backend.lower() not in {"redis"}:

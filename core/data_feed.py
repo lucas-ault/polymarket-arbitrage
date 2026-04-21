@@ -69,6 +69,14 @@ class DataFeed:
         # 0 disables the refresh entirely. Only meaningful when the operator
         # opted into auto-discovery (no explicit market_ids).
         self._discovery_refresh_interval: float = 300.0
+        if self.config and getattr(self.config, "monitoring", None):
+            self._discovery_refresh_interval = float(
+                getattr(
+                    self.config.monitoring,
+                    "market_discovery_refresh_interval_seconds",
+                    self._discovery_refresh_interval,
+                )
+            )
         
         # Statistics
         self._update_count = 0
@@ -84,6 +92,7 @@ class DataFeed:
         self._callback_latency_ms_total = 0.0
         self._callback_latency_ms_max = 0.0
         self._started_at: Optional[datetime] = None
+        self._orderbook_restart_lock = asyncio.Lock()
     
     async def start(self) -> None:
         """
@@ -165,19 +174,48 @@ class DataFeed:
                     return
                 # Force-refresh bypasses both the in-memory and Redis caches.
                 discovered = await self.client.list_markets(force_refresh=True)
-                added = 0
-                for market in discovered:
-                    if market.market_id not in self._markets:
-                        self._markets[market.market_id] = market
-                        if market.market_id not in self.market_ids:
-                            self.market_ids.append(market.market_id)
-                        added += 1
+                added = self._merge_discovered_markets(discovered)
                 if added:
                     logger.info("Market discovery refresh added %s new markets", added)
+                    await self._restart_orderbook_stream(
+                        reason=f"market discovery added {added} new markets"
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("Market discovery refresh failed: %s", exc)
+
+    def _merge_discovered_markets(self, discovered: list[Market]) -> int:
+        """Merge newly discovered markets into the monitored universe."""
+        added = 0
+        for market in discovered:
+            if market.market_id in self._markets:
+                continue
+            self._markets[market.market_id] = market
+            if market.market_id not in self.market_ids:
+                self.market_ids.append(market.market_id)
+            added += 1
+        return added
+
+    async def _restart_orderbook_stream(self, reason: str) -> None:
+        """Restart the order book task so new market subscriptions take effect."""
+        if not self._running:
+            return
+        async with self._orderbook_restart_lock:
+            task = self._orderbook_task
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if not self._running:
+                return
+            logger.info("Restarting order book stream: %s", reason)
+            self._orderbook_task = asyncio.create_task(
+                self._stream_orderbooks(),
+                name="orderbook_stream",
+            )
 
     def _discovery_bucket_key(self, market: Market) -> str:
         """Group similar markets so one event family can't monopolize all 200 slots."""

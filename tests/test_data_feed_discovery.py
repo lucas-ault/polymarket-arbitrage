@@ -219,3 +219,16 @@ async def test_discovery_respects_zero_max_monitored_markets_as_unlimited():
     await feed._fetch_markets()
 
     assert len(feed.market_ids) == 60
+
+
+def test_merge_discovered_markets_only_adds_new_markets():
+    existing = _market("existing-1", liquidity=100.0)
+    new_market = _market("new-1", liquidity=50.0)
+    feed = DataFeed(client=_StubClient(strict=[], loose=[]), market_ids=["existing-1"])
+    feed._markets = {"existing-1": existing}
+
+    added = feed._merge_discovered_markets([existing, new_market])
+
+    assert added == 1
+    assert feed.market_ids == ["existing-1", "new-1"]
+    assert set(feed._markets) == {"existing-1", "new-1"}

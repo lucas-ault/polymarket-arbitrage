@@ -35,23 +35,17 @@ async def test_connection(config_path: str = "config.yaml"):
         return False
     
     print(f"   Mode: {config.mode.trading_mode.upper()}")
-    print(f"   API Key: {config.api.api_key[:8]}..." if config.api.api_key else "   API Key: NOT SET")
+    print(f"   Key ID: {config.api.key_id[:8]}..." if config.api.key_id else "   Key ID: NOT SET")
     
     # Check credentials
     if config.is_live:
-        if not config.api.private_key or config.api.private_key in {"YOUR_WALLET_PRIVATE_KEY_HERE", "YOUR_PRIVATE_KEY_HERE"}:
-            print("❌ Private key not configured!")
-            print(f"   Edit {config_path} and add your wallet private key")
+        if not config.api.key_id or config.api.key_id == "YOUR_POLYMARKET_KEY_ID_HERE":
+            print("❌ key_id not configured!")
+            print(f"   Edit {config_path} and set api.key_id from polymarket.us/developer")
             return False
-        
-        api_fields = [
-            bool(config.api.api_key and config.api.api_key != "YOUR_API_KEY_HERE"),
-            bool(config.api.api_secret and config.api.api_secret != "YOUR_API_SECRET_HERE"),
-            bool(config.api.passphrase and config.api.passphrase != "YOUR_PASSPHRASE_HERE"),
-        ]
-        if sum(1 for ok in api_fields if ok) not in (0, 3):
-            print("❌ Incomplete API credentials.")
-            print("   Set api_key + api_secret + passphrase together, or leave all empty for auto-derive.")
+        if not config.api.secret_key or config.api.secret_key == "YOUR_POLYMARKET_SECRET_KEY_HERE":
+            print("❌ secret_key not configured!")
+            print(f"   Edit {config_path} and set api.secret_key from polymarket.us/developer")
             return False
     
     print()
@@ -80,19 +74,16 @@ async def test_connection(config_path: str = "config.yaml"):
     
     # Create client
     client = PolymarketClient(
-        rest_url=config.api.polymarket_rest_url,
-        ws_url=config.api.polymarket_ws_url,
-        gamma_url=config.api.gamma_api_url,
-        api_key=config.api.api_key,
-        api_secret=config.api.api_secret,
-        passphrase=config.api.passphrase,
-        private_key=config.api.private_key,
-        clob_chain_id=int(config.api.clob_chain_id),
-        clob_signature_type=int(config.api.clob_signature_type),
-        clob_funder_address=config.api.clob_funder_address or None,
-        clob_api_key_nonce=config.api.clob_api_key_nonce,
+        public_url=config.api.polymarket_public_url,
+        private_url=config.api.polymarket_private_url,
+        markets_ws_url=config.api.polymarket_markets_ws_url,
+        private_ws_url=config.api.polymarket_private_ws_url,
+        key_id=config.api.key_id,
+        secret_key=config.api.secret_key,
         timeout=config.api.timeout_seconds,
         dry_run=config.is_dry_run,
+        use_websocket=config.api.use_websocket,
+        use_rest_fallback=config.api.use_rest_fallback,
         markets_cache_ttl_seconds=getattr(config.cache, "markets_ttl_seconds", 900),
     )
     
@@ -103,12 +94,12 @@ async def test_connection(config_path: str = "config.yaml"):
         print(f"❌ Connection failed: {e}")
         return False
     
-    # Test Gamma API (market data)
+    # Test public markets API
     print()
-    print("📊 Testing Gamma API (market data)...")
+    print("📊 Testing public market data...")
     try:
-        markets = await client.list_markets({"limit": 5, "closed": "false"})
-        print(f"✅ Gamma API working - found {len(markets)} markets")
+        markets = await client.list_markets({"limit": 5, "active": True})
+        print(f"✅ Public API working - found {len(markets)} markets")
         
         if markets:
             print("   Sample markets:")
@@ -116,17 +107,18 @@ async def test_connection(config_path: str = "config.yaml"):
                 print(f"   - {m.question[:50]}...")
                 print(f"     Volume 24h: ${m.volume_24h:,.0f} | Liquidity: ${m.liquidity:,.0f}")
     except Exception as e:
-        print(f"❌ Gamma API error: {e}")
+        print(f"❌ Public API error: {e}")
         await client.disconnect()
         return False
     
-    # Test authenticated CLOB endpoints (L2 auth)
+    # Test authenticated endpoints
     if config.is_live:
         print()
         print("💼 Testing authenticated endpoints...")
         try:
+            positions = await client.get_positions()
             open_orders = await client.get_open_orders()
-            print(f"✅ L2 auth working - fetched {len(open_orders)} open orders")
+            print(f"✅ Auth working - {sum(len(v) for v in positions.values())} positions, {len(open_orders)} open orders")
         except Exception as e:
             print(f"❌ Auth test failed: {e}")
             await client.disconnect()

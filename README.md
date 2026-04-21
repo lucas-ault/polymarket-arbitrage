@@ -17,8 +17,8 @@ This repo currently supports these capabilities:
 
 | Capability | Status | Notes |
 | --- | --- | --- |
-| Polymarket market discovery from Gamma | Implemented | Scans active markets and caches token IDs |
-| Polymarket order book ingestion | Implemented | Main live path uses REST polling, not WebSocket |
+| Polymarket US market discovery | Implemented | Uses `gateway.polymarket.us` public endpoints |
+| Polymarket US order book ingestion | Implemented | WebSocket-first with REST polling fallback |
 | Bundle arbitrage detection | Implemented | `core/arb_engine.py` |
 | Market-making signal generation | Implemented | `core/arb_engine.py` |
 | Risk checks and kill switch | Implemented | `core/risk_manager.py` |
@@ -29,7 +29,7 @@ This repo currently supports these capabilities:
 | Polymarket/Kalshi market matching | Implemented | `core/cross_platform_arb.py` |
 | Cross-platform opportunity engine | Implemented in isolation | Logic exists but is not called from the live trading loop |
 | Automated Kalshi execution | Not implemented | Kalshi client is read-only market data in this repo |
-| Polymarket WebSocket order book path | Stubbed | `_connect_websocket()` exists but is not used by the main stream path |
+| Polymarket US WebSocket path | Implemented | Uses signed headers on `/v1/ws/markets` |
 
 ## Architecture
 ```mermaid
@@ -196,17 +196,14 @@ python main.py -c config.yaml -v
 Credentials can be supplied in `config.yaml` or via environment variables:
 
 ```bash
-export POLYMARKET_API_KEY="..."
-export POLYMARKET_API_SECRET="..."
-export POLYMARKET_PASSPHRASE="..."
-export POLYMARKET_PRIVATE_KEY="..."
+export POLYMARKET_KEY_ID="..."
+export POLYMARKET_SECRET_KEY="..."
 ```
 
 `load_config()` now auto-loads a local `.env` file if present, so you can keep
 secrets there without exporting each session.
 
-For live CLOB trading, use all L2 fields (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_PASSPHRASE`) plus `POLYMARKET_PRIVATE_KEY`.
-If you only have the private key, you can bootstrap/derive API creds with:
+For live polymarket.us trading, use `POLYMARKET_KEY_ID` and `POLYMARKET_SECRET_KEY` created in the developer portal:
 
 ```bash
 python create_polymarket_api_creds.py
@@ -214,7 +211,9 @@ python create_polymarket_api_creds.py
 
 Important implementation notes:
 
-- `api.clob_chain_id`, `api.clob_signature_type`, `api.clob_funder_address`, and `api.clob_api_key_nonce` control authenticated CLOB behavior when trading live
+- `api.use_websocket` enables signed market WebSocket subscriptions (`/v1/ws/markets`)
+- `api.use_rest_fallback` enables automatic polling fallback if websocket streaming fails
+- fee modeling uses the published polymarket.us formula `theta * contracts * p * (1 - p)`
 - `monitoring.heartbeat_interval` is defined but not used in the runtime loop
 - real-data feed tuning now comes from `monitoring.orderbook_*` fields (batch size, concurrency, and rotation delays)
 - dashboard payload size is intentionally capped for `/ws` and `/api/state`; use `/api/markets` for full market snapshots
@@ -279,8 +278,8 @@ Detailed docs live in `docs/`:
 - `docs/features/redis-cache.md`
 
 ## Known Limitations
-- The main "live" Polymarket order book stream is polling-based and rotates through market batches, so updates are not truly real-time across all discovered markets.
-- The Polymarket client contains TODO/placeholder comments around full authenticated CLOB integration.
+- WebSocket ingestion uses signed `polymarket.us` streams with REST fallback; under repeated WS failures, effective update cadence falls back to polling speed.
+- The adapter uses tolerant response parsing to support SDK/raw API fallbacks, so some newly-added endpoint fields may not be surfaced yet in internal models.
 - Cross-platform matching is operational for discovery and dashboard display, but cross-platform trading is not wired into the execution loop.
 - Some config keys are documented in code/config but not fully consumed by the entrypoints.
 

@@ -1,16 +1,13 @@
 api:
-  polymarket_rest_url: "https://clob.polymarket.com"
-  polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-  gamma_api_url: "https://gamma-api.polymarket.com"
+  polymarket_public_url: "https://gateway.polymarket.us"
+  polymarket_private_url: "https://api.polymarket.us"
+  polymarket_markets_ws_url: "wss://api.polymarket.us/v1/ws/markets"
+  polymarket_private_ws_url: "wss://api.polymarket.us/v1/ws/private"
   kalshi_api_url: "https://api.elections.kalshi.com/trade-api/v2"
-  api_key: "YOUR_API_KEY_HERE"
-  api_secret: "YOUR_API_SECRET_HERE"
-  passphrase: "YOUR_PASSPHRASE_HERE"
-  private_key: "YOUR_PRIVATE_KEY_HERE"
-  clob_chain_id: 137
-  clob_signature_type: 0
-  clob_funder_address: ""
-  clob_api_key_nonce: null
+  key_id: "YOUR_POLYMARKET_KEY_ID_HERE"
+  secret_key: "YOUR_POLYMARKET_SECRET_KEY_HERE"
+  use_websocket: true
+  use_rest_fallback: true
   timeout_seconds: 30
   max_retries: 3
   retry_delay_seconds: 1
@@ -28,9 +25,11 @@ trading:
   max_order_size: 6
   slippage_tolerance: 0.01
   order_timeout_seconds: 60
-  maker_fee_bps: 0
-  taker_fee_bps: 150
-  estimated_gas_per_order: 0.02
+  fee_mode: "polymarket_us"
+  maker_fee_bps: -125
+  taker_fee_bps: 500
+  fee_theta_taker: 0.05
+  fee_theta_maker: -0.0125
 
 risk:
   max_position_per_market: 10
@@ -78,6 +77,7 @@ monitoring:
   orderbook_request_delay_seconds: 0.0
   orderbook_batch_delay_seconds: 0.12
   orderbook_rotation_delay_seconds: 1.0
+  websocket_reconnect_delay_seconds: 1.5
 
 cache:
   enabled: true

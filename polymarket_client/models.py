@@ -165,6 +165,7 @@ class Market:
     market_id: str
     condition_id: str
     question: str
+    market_slug: str = ""
     description: str = ""
     
     # Token IDs
@@ -199,6 +200,7 @@ class Order:
     side: OrderSide
     price: float
     size: float
+    market_slug: str = ""
     filled_size: float = 0.0
     status: OrderStatus = OrderStatus.PENDING
     
@@ -234,6 +236,7 @@ class Position:
     market_id: str
     token_type: TokenType
     size: float  # Positive for long, negative for short
+    market_slug: str = ""
     avg_entry_price: float = 0.0
     realized_pnl: float = 0.0
     
@@ -267,6 +270,7 @@ class Trade:
     side: OrderSide
     price: float
     size: float
+    market_slug: str = ""
     fee: float = 0.0
     timestamp: datetime = field(default_factory=datetime.utcnow)
     

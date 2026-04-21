@@ -38,10 +38,14 @@ This document covers how runtime settings enter the system, how backtesting work
 ## Environment Variable Overrides
 Supported env vars:
 
-- `POLYMARKET_API_KEY`
-- `POLYMARKET_API_SECRET`
-- `POLYMARKET_PASSPHRASE`
-- `POLYMARKET_PRIVATE_KEY`
+- `POLYMARKET_KEY_ID`
+- `POLYMARKET_SECRET_KEY`
+- `POLYMARKET_PUBLIC_URL`
+- `POLYMARKET_PRIVATE_URL`
+- `POLYMARKET_MARKETS_WS_URL`
+- `POLYMARKET_PRIVATE_WS_URL`
+- `POLYMARKET_USE_WEBSOCKET`
+- `POLYMARKET_USE_REST_FALLBACK`
 - `CACHE_ENABLED`
 - `CACHE_BACKEND`
 - `REDIS_URL`
@@ -66,8 +70,8 @@ The loader validates:
 
 In live mode it also checks that:
 
-- `api.api_key` is present
-- `api.private_key` is present
+- `api.key_id` is present
+- `api.secret_key` is present
 
 ## Config Sections
 ### `api`
@@ -117,7 +121,8 @@ These config values exist but are not fully consumed by the runtime entrypoints:
 
 - `trading.maker_fee_bps`
 - `trading.taker_fee_bps`
-- `trading.estimated_gas_per_order`
+- `trading.fee_theta_taker`
+- `trading.fee_theta_maker`
 - most of the `logging` section
 - `monitoring.heartbeat_interval`
 

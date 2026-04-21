@@ -13,7 +13,7 @@ async def test():
     client = PolymarketClient(dry_run=True)
     await client.connect()
     
-    print("\n1. Fetching markets from Gamma API...")
+    print("\n1. Fetching markets from polymarket.us public API...")
     try:
         markets = await client.list_markets({"limit": 5, "closed": "false"})
         print(f"   [OK] Found {len(markets)} markets\n")
@@ -21,7 +21,7 @@ async def test():
         for i, m in enumerate(markets[:3], 1):
             print(f"   Market {i}: {m.question[:55]}...")
             print(f"      ID: {m.market_id}")
-            print(f"      YES Token: {m.yes_token_id[:40]}..." if m.yes_token_id else "      YES Token: Not available")
+            print(f"      Slug: {m.market_slug}")
             print(f"      Volume 24h: ${m.volume_24h:,.0f}")
             print()
             
@@ -29,8 +29,8 @@ async def test():
         print(f"   [ERROR] {e}")
     
     # Try to get real order book
-    if markets and markets[0].yes_token_id:
-        print("2. Fetching REAL order book from CLOB API...")
+    if markets:
+        print("2. Fetching REAL order book from polymarket.us...")
         try:
             market = markets[0]
             orderbook = await client.get_orderbook(market.market_id)
@@ -48,7 +48,6 @@ async def test():
                 print(f"   Potential Edge: {edge*100:.2f}%")
         except Exception as e:
             print(f"   [WARN] Order book error: {e}")
-            print("   (Order book API may require different token format)")
     
     await client.disconnect()
     print("\n" + "=" * 60)

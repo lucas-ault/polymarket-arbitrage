@@ -22,18 +22,15 @@ class ConfigError(Exception):
 @dataclass
 class ApiConfig:
     """API configuration."""
-    polymarket_rest_url: str = "https://clob.polymarket.com"
-    polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    gamma_api_url: str = "https://gamma-api.polymarket.com"
+    polymarket_public_url: str = "https://gateway.polymarket.us"
+    polymarket_private_url: str = "https://api.polymarket.us"
+    polymarket_markets_ws_url: str = "wss://api.polymarket.us/v1/ws/markets"
+    polymarket_private_ws_url: str = "wss://api.polymarket.us/v1/ws/private"
     kalshi_api_url: str = "https://api.elections.kalshi.com/trade-api/v2"
-    api_key: str = ""
-    api_secret: str = ""
-    passphrase: str = ""
-    private_key: str = ""
-    clob_chain_id: int = 137
-    clob_signature_type: int = 0
-    clob_funder_address: str = ""
-    clob_api_key_nonce: Optional[int] = None
+    key_id: str = ""
+    secret_key: str = ""
+    use_websocket: bool = True
+    use_rest_fallback: bool = True
     timeout_seconds: float = 30.0
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
@@ -53,9 +50,11 @@ class TradingConfig:
     max_order_size: float = 200.0
     slippage_tolerance: float = 0.02
     order_timeout_seconds: float = 60.0
-    maker_fee_bps: float = 0.0
-    taker_fee_bps: float = 0.0
-    estimated_gas_per_order: float = 0.0
+    fee_mode: str = "polymarket_us"
+    maker_fee_bps: float = -125.0
+    taker_fee_bps: float = 500.0
+    fee_theta_taker: float = 0.05
+    fee_theta_maker: float = -0.0125
 
 
 @dataclass
@@ -115,6 +114,7 @@ class MonitoringConfig:
     orderbook_request_delay_seconds: float = 0.0
     orderbook_batch_delay_seconds: float = 0.15
     orderbook_rotation_delay_seconds: float = 1.25
+    websocket_reconnect_delay_seconds: float = 1.5
 
 
 @dataclass
@@ -196,15 +196,16 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
     
     # Handle environment variable overrides
     api_data = _apply_env_overrides(api_data, {
-        "api_key": "POLYMARKET_API_KEY",
-        "api_secret": "POLYMARKET_API_SECRET",
-        "passphrase": "POLYMARKET_PASSPHRASE",
-        "private_key": "POLYMARKET_PRIVATE_KEY",
-        "clob_chain_id": "POLYMARKET_CHAIN_ID",
-        "clob_signature_type": "POLYMARKET_SIGNATURE_TYPE",
-        "clob_funder_address": "POLYMARKET_FUNDER_ADDRESS",
-        "clob_api_key_nonce": "POLYMARKET_API_KEY_NONCE",
+        "key_id": "POLYMARKET_KEY_ID",
+        "secret_key": "POLYMARKET_SECRET_KEY",
+        "polymarket_public_url": "POLYMARKET_PUBLIC_URL",
+        "polymarket_private_url": "POLYMARKET_PRIVATE_URL",
+        "polymarket_markets_ws_url": "POLYMARKET_MARKETS_WS_URL",
+        "polymarket_private_ws_url": "POLYMARKET_PRIVATE_WS_URL",
+        "use_websocket": "POLYMARKET_USE_WEBSOCKET",
+        "use_rest_fallback": "POLYMARKET_USE_REST_FALLBACK",
     })
+    api_data = _coerce_api_types(api_data)
     cache_data = _apply_env_overrides(cache_data, {
         "enabled": "CACHE_ENABLED",
         "backend": "CACHE_BACKEND",
@@ -279,6 +280,24 @@ def _coerce_cache_types(cache_data: dict) -> dict:
     return result
 
 
+def _coerce_api_types(api_data: dict) -> dict:
+    """Coerce env-overridden API values to expected types."""
+    result = api_data.copy()
+
+    def _to_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    for key in ("use_websocket", "use_rest_fallback"):
+        if key in result:
+            result[key] = _to_bool(result[key])
+
+    return result
+
+
 def _validate_config(config: BotConfig) -> None:
     """Validate configuration values."""
     errors = []
@@ -344,16 +363,10 @@ def _validate_config(config: BotConfig) -> None:
     
     # Live mode checks
     if config.is_live:
-        if not config.api.private_key or config.api.private_key == "YOUR_PRIVATE_KEY_HERE":
-            errors.append("api.private_key is required for live trading")
-        api_fields = {
-            "api_key": config.api.api_key and config.api.api_key != "YOUR_API_KEY_HERE",
-            "api_secret": config.api.api_secret and config.api.api_secret != "YOUR_API_SECRET_HERE",
-            "passphrase": config.api.passphrase and config.api.passphrase != "YOUR_PASSPHRASE_HERE",
-        }
-        configured_count = sum(1 for ok in api_fields.values() if ok)
-        if configured_count not in (0, 3):
-            errors.append("api.api_key/api_secret/passphrase must be set together (or all omitted for auto-derive)")
+        if not config.api.key_id or config.api.key_id == "YOUR_POLYMARKET_KEY_ID_HERE":
+            errors.append("api.key_id is required for live trading")
+        if not config.api.secret_key or config.api.secret_key == "YOUR_POLYMARKET_SECRET_KEY_HERE":
+            errors.append("api.secret_key is required for live trading")
     
     if errors:
         raise ConfigError("Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors))

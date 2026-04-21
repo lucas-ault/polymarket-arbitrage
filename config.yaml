@@ -2,25 +2,20 @@
 # ========================================
 
 api:
-  # Polymarket API endpoints
-  polymarket_rest_url: "https://clob.polymarket.com"
-  polymarket_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-  gamma_api_url: "https://gamma-api.polymarket.com"
+  # Polymarket US endpoints
+  polymarket_public_url: "https://gateway.polymarket.us"
+  polymarket_private_url: "https://api.polymarket.us"
+  polymarket_markets_ws_url: "wss://api.polymarket.us/v1/ws/markets"
+  polymarket_private_ws_url: "wss://api.polymarket.us/v1/ws/private"
   
   # Kalshi API endpoint (public, no auth needed for market data)
   kalshi_api_url: "https://api.elections.kalshi.com/trade-api/v2"
   
-  # Authentication (replace with your credentials)
-  api_key: "YOUR_API_KEY_HERE"
-  api_secret: "YOUR_API_SECRET_HERE"
-  passphrase: "YOUR_PASSPHRASE_HERE"
-  
-  # Wallet configuration
-  private_key: "YOUR_PRIVATE_KEY_HERE"
-  clob_chain_id: 137
-  clob_signature_type: 0
-  clob_funder_address: ""
-  clob_api_key_nonce: null
+  # Authentication (replace with polymarket.us developer keys)
+  key_id: "YOUR_POLYMARKET_KEY_ID_HERE"
+  secret_key: "YOUR_POLYMARKET_SECRET_KEY_HERE"
+  use_websocket: true
+  use_rest_fallback: true
   
   # Request settings
   timeout_seconds: 30
@@ -49,10 +44,12 @@ trading:
   slippage_tolerance: 0.02  # Max allowed slippage from signal to execution
   order_timeout_seconds: 60 # Cancel unfilled orders after this time
   
-  # Fees (Polymarket rates - conservative estimates)
-  maker_fee_bps: 0          # 0% for maker (limit orders adding liquidity)
-  taker_fee_bps: 150        # 1.5% for taker (taking liquidity)
-  estimated_gas_per_order: 0.02  # ~$0.02 gas on Polygon
+  # Fees (polymarket.us schedule)
+  fee_mode: "polymarket_us"
+  maker_fee_bps: -125       # displayed for observability only (25% maker rebate of taker theta)
+  taker_fee_bps: 500        # displayed for observability only (theta=0.05 at p=0.5)
+  fee_theta_taker: 0.05
+  fee_theta_maker: -0.0125
 
 risk:
   # Position limits - CONSERVATIVE for $50 budget

@@ -31,7 +31,8 @@ def arb_config() -> ArbConfig:
         # Set fees to 0 for testing (easier to verify edge calculations)
         maker_fee_bps=0,
         taker_fee_bps=0,
-        gas_cost_per_order=0,
+        fee_theta_taker=0.0,
+        fee_theta_maker=0.0,
     )
 
 

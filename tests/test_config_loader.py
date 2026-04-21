@@ -53,3 +53,43 @@ cache:
     )
     with pytest.raises(ConfigError):
         load_config(str(config_path))
+
+
+def test_live_mode_requires_key_id_and_secret_key(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    _write_config(
+        config_path,
+        """
+mode:
+  trading_mode: live
+api:
+  key_id: ""
+  secret_key: ""
+""",
+    )
+    with pytest.raises(ConfigError):
+        load_config(str(config_path))
+
+
+def test_env_overrides_polymarket_us_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_path = tmp_path / "config.yaml"
+    _write_config(
+        config_path,
+        """
+api:
+  key_id: "bad"
+  secret_key: "bad"
+  use_websocket: false
+  use_rest_fallback: false
+""",
+    )
+    monkeypatch.setenv("POLYMARKET_KEY_ID", "env-key")
+    monkeypatch.setenv("POLYMARKET_SECRET_KEY", "env-secret")
+    monkeypatch.setenv("POLYMARKET_USE_WEBSOCKET", "true")
+    monkeypatch.setenv("POLYMARKET_USE_REST_FALLBACK", "1")
+
+    config = load_config(str(config_path))
+    assert config.api.key_id == "env-key"
+    assert config.api.secret_key == "env-secret"
+    assert config.api.use_websocket is True
+    assert config.api.use_rest_fallback is True

@@ -5,7 +5,8 @@
 httpx>=0.25.0
 websockets>=12.0
 aiohttp>=3.9.0
-py-clob-client
+polymarket-us
+cryptography>=42.0.0
 
 # Configuration
 pyyaml>=6.0.1

@@ -1,56 +1,24 @@
 #!/usr/bin/env python3
 """
-Create or derive Polymarket CLOB API credentials (L2) from L1 key.
+Print setup instructions for polymarket.us API credentials.
 
-Usage:
-  export POLYMARKET_PRIVATE_KEY=0x...
-  python3 create_polymarket_api_creds.py
-
-Optional env vars:
-  POLYMARKET_HOST=https://clob.polymarket.com
-  POLYMARKET_CHAIN_ID=137
-  POLYMARKET_SIGNATURE_TYPE=0
-  POLYMARKET_FUNDER_ADDRESS=0x...
-  POLYMARKET_API_KEY_NONCE=0
+The legacy CLOB wallet-derived credential flow is not used for polymarket.us.
+Generate keys in https://polymarket.us/developer and export them as env vars.
 """
 
-import os
 import sys
-
-from eth_account import Account
-from py_clob_client.client import ClobClient
 
 
 def main() -> int:
-    private_key = os.getenv("POLYMARKET_PRIVATE_KEY", "").strip()
-    if not private_key:
-        print("Missing POLYMARKET_PRIVATE_KEY")
-        return 1
-
-    host = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com").strip()
-    chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137"))
-    signature_type = int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
-    funder = os.getenv("POLYMARKET_FUNDER_ADDRESS", "").strip()
-    if not funder:
-        funder = Account.from_key(private_key).address
-
-    nonce_env = os.getenv("POLYMARKET_API_KEY_NONCE", "").strip()
-    nonce = int(nonce_env) if nonce_env else None
-
-    client = ClobClient(
-        host=host,
-        chain_id=chain_id,
-        key=private_key,
-        signature_type=signature_type,
-        funder=funder,
-    )
-    creds = client.create_or_derive_api_creds(nonce)
-
-    print("# Save these in your shell profile or deployment secret store")
-    print(f'export POLYMARKET_API_KEY="{creds.api_key}"')
-    print(f'export POLYMARKET_API_SECRET="{creds.api_secret}"')
-    print(f'export POLYMARKET_PASSPHRASE="{creds.api_passphrase}"')
-    print(f'export POLYMARKET_FUNDER_ADDRESS="{funder}"')
+    print("polymarket.us credentials are created in the developer portal:")
+    print("  https://polymarket.us/developer")
+    print("")
+    print("Export these values before running in live mode:")
+    print('  export POLYMARKET_KEY_ID="your-key-id"')
+    print('  export POLYMARKET_SECRET_KEY="your-secret-key"')
+    print("")
+    print("Then run:")
+    print("  python3 test_connection.py")
     return 0
 
 

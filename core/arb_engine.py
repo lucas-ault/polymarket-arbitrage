@@ -47,11 +47,13 @@ class ArbConfig:
     # Signal expiry
     signal_expiry_seconds: float = 5.0
     
-    # Fees (in basis points - 100 bps = 1%)
-    # Polymarket: ~0% maker, ~1.5% taker
-    maker_fee_bps: float = 0        # Limit orders adding liquidity
-    taker_fee_bps: float = 150      # Taking liquidity (1.5%)
-    gas_cost_per_order: float = 0.02  # ~$0.02 on Polygon
+    # Fees (kept for dashboard visibility / compatibility)
+    maker_fee_bps: float = -125
+    taker_fee_bps: float = 500
+
+    # polymarket.us fee schedule: fee = theta * contracts * p * (1 - p)
+    fee_theta_taker: float = 0.05
+    fee_theta_maker: float = -0.0125
 
 
 @dataclass
@@ -295,24 +297,17 @@ class ArbEngine:
         total_ask = best_ask_yes + best_ask_no
         total_bid = best_bid_yes + best_bid_no
         
-        # Calculate total fees for 2 orders (buy YES + buy NO, or sell both)
-        # Fee is percentage of notional, applied to each leg
-        taker_fee_pct = self.config.taker_fee_bps / 10000  # Convert bps to decimal
-        gas_cost = self.config.gas_cost_per_order * 2  # 2 orders
-        
-        # For bundle long: we buy both, pay fees on each
-        # Fee cost = taker_fee_pct * (ask_yes + ask_no) = taker_fee_pct * total_ask
-        fee_cost_long = taker_fee_pct * total_ask
-        
-        # For bundle short: we sell both, pay fees on each  
-        fee_cost_short = taker_fee_pct * total_bid
+        # Fee per contract leg on polymarket.us:
+        # fee = theta * contracts * p * (1 - p), with contracts=1 for edge math.
+        fee_cost_long = self._estimate_taker_fee(best_ask_yes) + self._estimate_taker_fee(best_ask_no)
+        fee_cost_short = self._estimate_taker_fee(best_bid_yes) + self._estimate_taker_fee(best_bid_no)
         
         opportunity: Optional[Opportunity] = None
         
         # Check for bundle long opportunity (buy both for < $1)
         # Must be profitable AFTER fees: 1.0 - total_ask - fees > min_edge
         gross_edge_long = 1.0 - total_ask
-        net_edge_long = gross_edge_long - fee_cost_long - gas_cost
+        net_edge_long = gross_edge_long - fee_cost_long
         
         if net_edge_long >= self.config.min_edge:
             edge = net_edge_long  # Use NET edge (after fees)
@@ -352,7 +347,7 @@ class ArbEngine:
         # Check for bundle short opportunity (sell both for > $1)
         # Must be profitable AFTER fees: total_bid - 1.0 - fees > min_edge
         gross_edge_short = total_bid - 1.0
-        net_edge_short = gross_edge_short - fee_cost_short - gas_cost
+        net_edge_short = gross_edge_short - fee_cost_short
         
         if opportunity is None and net_edge_short >= self.config.min_edge:
             edge = net_edge_short  # Use NET edge (after fees)
@@ -461,6 +456,11 @@ class ArbEngine:
         
         self.stats.signals_generated += 1
         return signal
+
+    def _estimate_taker_fee(self, price: float) -> float:
+        """Estimate per-contract taker fee at a given price."""
+        clamped_price = max(0.0, min(1.0, price))
+        return self.config.fee_theta_taker * clamped_price * (1.0 - clamped_price)
     
     def _check_market_making(self, market_id: str, order_book: OrderBook) -> list[Signal]:
         """

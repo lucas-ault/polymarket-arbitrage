@@ -108,21 +108,18 @@ class TradingBotWithDashboard:
         )
         self.cache_store = await create_cache_store(cache_config)
         self.client = PolymarketClient(
-            rest_url=self.config.api.polymarket_rest_url,
-            ws_url=self.config.api.polymarket_ws_url,
-            gamma_url=self.config.api.gamma_api_url,
-            api_key=self.config.api.api_key,
-            api_secret=self.config.api.api_secret,
-            passphrase=self.config.api.passphrase,
-            private_key=self.config.api.private_key,
-            clob_chain_id=int(self.config.api.clob_chain_id),
-            clob_signature_type=int(self.config.api.clob_signature_type),
-            clob_funder_address=self.config.api.clob_funder_address or None,
-            clob_api_key_nonce=self.config.api.clob_api_key_nonce,
+            public_url=self.config.api.polymarket_public_url,
+            private_url=self.config.api.polymarket_private_url,
+            markets_ws_url=self.config.api.polymarket_markets_ws_url,
+            private_ws_url=self.config.api.polymarket_private_ws_url,
+            key_id=self.config.api.key_id,
+            secret_key=self.config.api.secret_key,
             timeout=self.config.api.timeout_seconds,
             max_retries=self.config.api.max_retries,
             retry_delay=self.config.api.retry_delay_seconds,
             dry_run=self.config.is_dry_run,
+            use_websocket=self.config.api.use_websocket,
+            use_rest_fallback=self.config.api.use_rest_fallback,
             cache_store=self.cache_store,
             markets_cache_ttl_seconds=self.config.cache.markets_ttl_seconds,
         )
@@ -143,7 +140,7 @@ class TradingBotWithDashboard:
                 min_edge=self.config.trading.min_edge,
                 polymarket_taker_fee=self.config.trading.taker_fee_bps / 10000,
                 kalshi_taker_fee=self.config.trading.taker_fee_bps / 10000,
-                gas_cost=self.config.trading.estimated_gas_per_order,
+                gas_cost=0.0,
                 match_min_similarity=self.config.mode.min_match_similarity,
             )
             self.market_matcher = self.cross_platform_engine.matcher
@@ -197,7 +194,8 @@ class TradingBotWithDashboard:
             max_order_size=self.config.trading.max_order_size,
             maker_fee_bps=self.config.trading.maker_fee_bps,
             taker_fee_bps=self.config.trading.taker_fee_bps,
-            gas_cost_per_order=self.config.trading.estimated_gas_per_order,
+            fee_theta_taker=self.config.trading.fee_theta_taker,
+            fee_theta_maker=self.config.trading.fee_theta_maker,
         ))
         
         # Initialize data feed

@@ -34,7 +34,7 @@ risk:
   max_daily_loss: 6
   max_drawdown_pct: 0.15
   trade_only_high_volume: true
-  min_24h_volume: 50000
+  min_24h_volume: 5000
   whitelist: []
   blacklist: []
   kill_switch_enabled: true

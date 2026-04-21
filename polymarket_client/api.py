@@ -424,6 +424,7 @@ class PolymarketClient(BasePolymarketClient):
             payload = await self._sdk_client.markets.list(params)
         else:
             payload = await self._request("GET", "/v1/markets", params=params, use_private=False)
+        payload = self._coerce_to_dict(payload)
         items = self._extract_items(payload, ("markets", "data", "results"))
         if not items and isinstance(payload, dict):
             maybe_single = self._parse_market(payload)
@@ -455,6 +456,7 @@ class PolymarketClient(BasePolymarketClient):
             payload = await self._sdk_client.markets.retrieve_by_slug(market_id)
         else:
             payload = await self._request("GET", f"/v1/markets/{market_id}", use_private=False)
+        payload = self._coerce_to_dict(payload)
         market = self._parse_market(payload)
         if not market:
             market = Market(
@@ -500,6 +502,77 @@ class PolymarketClient(BasePolymarketClient):
             return float(raw or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    @classmethod
+    def _coerce_to_dict(cls, payload: Any) -> Any:
+        """Convert SDK pydantic-like response objects to plain dicts/lists.
+
+        The polymarket_us SDK has historically returned both plain dicts and
+        typed pydantic models depending on version. The downstream parsers
+        rely on dict.get() and isinstance(dict) checks, so a typed object
+        silently produces empty orderbooks. This helper recursively unwraps
+        anything that exposes pydantic-style serialization hooks.
+        """
+        if payload is None or isinstance(payload, (str, int, float, bool)):
+            return payload
+        if isinstance(payload, dict):
+            return {key: cls._coerce_to_dict(value) for key, value in payload.items()}
+        if isinstance(payload, (list, tuple)):
+            return [cls._coerce_to_dict(item) for item in payload]
+        # pydantic v2
+        for attr in ("model_dump", "dict", "to_dict"):
+            method = getattr(payload, attr, None)
+            if callable(method):
+                try:
+                    return cls._coerce_to_dict(method())
+                except Exception:
+                    continue
+        # last-resort: drop into __dict__ for typed objects without serializers
+        if hasattr(payload, "__dict__"):
+            try:
+                return cls._coerce_to_dict(
+                    {
+                        k: v
+                        for k, v in vars(payload).items()
+                        if not k.startswith("_")
+                    }
+                )
+            except Exception:
+                return payload
+        return payload
+
+    @staticmethod
+    def _summarize_payload_shape(payload: Any, depth: int = 0, max_depth: int = 3) -> str:
+        """Produce a compact, log-safe summary of a response payload's shape.
+
+        Used as a one-shot diagnostic so the operator can see what keys the
+        SDK or REST endpoint actually returned without dumping potentially
+        huge / sensitive payloads to the log.
+        """
+        if depth >= max_depth:
+            return f"<{type(payload).__name__}>"
+        if payload is None or isinstance(payload, (bool, int, float)):
+            return f"<{type(payload).__name__}>"
+        if isinstance(payload, str):
+            return f"<str len={len(payload)}>"
+        if isinstance(payload, dict):
+            keys = list(payload.keys())[:8]
+            inner = ", ".join(
+                f"{k}={PolymarketClient._summarize_payload_shape(payload[k], depth + 1, max_depth)}"
+                for k in keys
+            )
+            extra = "" if len(payload) <= 8 else f" (+{len(payload) - 8} more)"
+            return "{" + inner + extra + "}"
+        if isinstance(payload, (list, tuple)):
+            head = (
+                PolymarketClient._summarize_payload_shape(payload[0], depth + 1, max_depth)
+                if payload
+                else "empty"
+            )
+            return f"[len={len(payload)}, item0={head}]"
+        # typed object: list non-private attrs
+        attrs = [a for a in dir(payload) if not a.startswith("_")][:8]
+        return f"<{type(payload).__name__} attrs={attrs}>"
 
     @staticmethod
     def _parse_timestamp(*raw_values: Any) -> datetime:
@@ -561,6 +634,31 @@ class PolymarketClient(BasePolymarketClient):
                 f"/v1/markets/{slug}/book",
                 use_private=False,
             )
+
+        # One-shot diagnostic: dump the raw payload shape for the first few
+        # orderbooks fetched. Without this we can't tell if the SDK is
+        # returning typed objects (which would silently fail isinstance(dict)
+        # checks below and produce empty books) or unexpected key names.
+        # Auto-disables after 2 logs to avoid spam.
+        if self._runtime_stats.get("orderbook_payload_samples_logged", 0.0) < 2.0:
+            self._runtime_stats["orderbook_payload_samples_logged"] = (
+                self._runtime_stats.get("orderbook_payload_samples_logged", 0.0) + 1.0
+            )
+            sample_repr = self._summarize_payload_shape(payload)
+            logger.info(
+                "Orderbook raw payload sample [slug=%s]: type=%s | shape=%s",
+                slug,
+                type(payload).__name__,
+                sample_repr,
+            )
+
+        # Normalize SDK-returned typed objects (pydantic-like) to dicts so the
+        # downstream key-based parsing works regardless of whether we hit the
+        # SDK or raw HTTP. SDK responses look like dicts in the docs but some
+        # versions return wrapped pydantic models — without this normalization
+        # the entire orderbook data is silently discarded.
+        payload = self._coerce_to_dict(payload)
+
         if isinstance(payload, dict):
             if "book" in payload and isinstance(payload["book"], dict):
                 payload = payload["book"]

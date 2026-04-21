@@ -339,21 +339,28 @@ class ArbEngine:
         best_bid_yes = order_book.best_bid_yes
         best_bid_no = order_book.best_bid_no
 
+        # If the NO side is synthesized as the YES complement, total_ask and
+        # total_bid both collapse to 1 ± spread, so no arb can exist. Skip
+        # these and count them so operators can see how many of their markets
+        # are "fake 2-sided" (Polymarket usually returns only YES quotes for
+        # binary markets and we synthesize NO as 1 - YES for display).
+        # NOTE: this check runs BEFORE the missing-leg check so that
+        # synthesized one-sided books are reported under the more informative
+        # "synthetic-NO" bucket instead of the generic "one-sided" bucket.
+        # Otherwise the operator sees 100% one-sided and can't tell whether
+        # the parser is working — they'd assume the API is broken when in
+        # reality the parser is doing its job and the upstream YES book is
+        # genuinely thin.
+        if order_book.no.synthetic or order_book.yes.synthetic:
+            self.stats.bundle_skipped_synthetic_no += 1
+            return None
+
         # Need all prices to evaluate. One-sided books (common on long-tail
         # Polymarket markets where only one leg has resting liquidity) get
         # counted separately so the operator can tell at a glance whether the
         # bundle-arb pipeline is starved of input vs. just seeing tight books.
         if None in (best_ask_yes, best_ask_no, best_bid_yes, best_bid_no):
             self.stats.bundle_skipped_missing_leg += 1
-            return None
-
-        # If the NO side is synthesized as the YES complement, total_ask and
-        # total_bid both collapse to 1 ± spread, so no arb can exist. Skip
-        # these and count them so operators can see how many of their markets
-        # are "fake 2-sided" (Polymarket usually returns only YES quotes for
-        # binary markets and we synthesize NO as 1 - YES for display).
-        if order_book.no.synthetic or order_book.yes.synthetic:
-            self.stats.bundle_skipped_synthetic_no += 1
             return None
 
         total_ask = best_ask_yes + best_ask_no

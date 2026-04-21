@@ -405,6 +405,16 @@ class PolymarketClient(BasePolymarketClient):
             levels.append(PriceLevel(price=price, size=max(size, 0.0)))
         return levels
 
+    @staticmethod
+    def _amount_value(raw: Any) -> float:
+        """Parse USD amount fields that may be primitives or {value, currency} objects."""
+        if isinstance(raw, dict):
+            raw = raw.get("value") or raw.get("amount") or 0
+        try:
+            return float(raw or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     def _book_side(self, payload: dict[str, Any], prefix: str) -> TokenOrderBook:
         return TokenOrderBook(
             token_type=TokenType.YES if prefix == "yes" else TokenType.NO,
@@ -456,6 +466,40 @@ class PolymarketClient(BasePolymarketClient):
                 OrderBookSide([PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in asks]),
                 OrderBookSide([PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in bids]),
             )
+
+        # If full book is unavailable, fall back to BBO for top-of-book prices.
+        if not yes_book.bids.levels and not yes_book.asks.levels:
+            try:
+                bbo_payload = await self._request("GET", f"/v1/markets/{slug}/bbo", use_private=False)
+                if isinstance(bbo_payload, dict):
+                    bbo_data = (
+                        bbo_payload.get("marketData")
+                        or bbo_payload.get("market_data")
+                        or bbo_payload
+                    )
+                else:
+                    bbo_data = {}
+                if isinstance(bbo_data, dict):
+                    best_bid = self._amount_value(bbo_data.get("bestBid") or bbo_data.get("best_bid"))
+                    best_ask = self._amount_value(bbo_data.get("bestAsk") or bbo_data.get("best_ask"))
+                    bid_depth = float(bbo_data.get("bidDepth") or bbo_data.get("bid_depth") or 1)
+                    ask_depth = float(bbo_data.get("askDepth") or bbo_data.get("ask_depth") or 1)
+                    if best_bid > 0:
+                        yes_book.bids.levels = [PriceLevel(price=best_bid, size=bid_depth)]
+                    if best_ask > 0:
+                        yes_book.asks.levels = [PriceLevel(price=best_ask, size=ask_depth)]
+                    if yes_book.bids.levels or yes_book.asks.levels:
+                        no_book = TokenOrderBook(
+                            TokenType.NO,
+                            OrderBookSide(
+                                [PriceLevel(price=max(0.01, 1.0 - level.price), size=level.size) for level in yes_book.asks.levels]
+                            ),
+                            OrderBookSide(
+                                [PriceLevel(price=min(0.99, 1.0 - level.price), size=level.size) for level in yes_book.bids.levels]
+                            ),
+                        )
+            except Exception as exc:
+                logger.debug("BBO fallback failed for %s: %s", slug, exc)
 
         return OrderBook(market_id=market.market_id, yes=yes_book, no=no_book, timestamp=datetime.utcnow())
 
@@ -518,9 +562,10 @@ class PolymarketClient(BasePolymarketClient):
                     request_id = f"markets-{uuid.uuid4().hex[:10]}"
                     subscribe_msg = {
                         "subscribe": {
-                            "requestId": request_id,
-                            "subscriptionType": "SUBSCRIPTION_TYPE_MARKET_DATA",
-                            "marketSlugs": market_slugs,
+                            # Use snake_case + numeric enum for broad compatibility.
+                            "request_id": request_id,
+                            "subscription_type": 1,
+                            "market_slugs": market_slugs,
                         }
                     }
                     await ws.send(json.dumps(subscribe_msg))
@@ -717,23 +762,28 @@ class PolymarketClient(BasePolymarketClient):
                 payload = await self._sdk_client.portfolio.positions()
             else:
                 payload = await self._request("GET", "/v1/portfolio/positions", use_private=True)
-            items = self._extract_items(payload, ("positions", "data", "results"))
             positions: dict[str, dict[TokenType, Position]] = {}
-            for item in items:
-                market_slug = str(item.get("marketSlug") or item.get("market_slug") or item.get("slug") or "")
-                market_id = str(item.get("marketId") or item.get("market_id") or market_slug)
-                outcome = str(item.get("outcome") or item.get("side") or "YES").upper()
-                token_type = TokenType.NO if "SHORT" in outcome or outcome == "NO" else TokenType.YES
-                size = float(item.get("quantity") or item.get("size") or 0.0)
-                if size == 0:
+            positions_map = payload.get("positions") if isinstance(payload, dict) else None
+            if isinstance(positions_map, dict):
+                iterable = positions_map.items()
+            else:
+                iterable = []
+            for market_slug, item in iterable:
+                if not isinstance(item, dict):
                     continue
+                market_slug = str(market_slug or item.get("marketSlug") or item.get("slug") or "")
+                market_id = str(item.get("marketId") or item.get("market_id") or market_slug)
+                net = float(item.get("netPosition") or item.get("net_position") or 0.0)
+                if net == 0:
+                    continue
+                token_type = TokenType.YES if net > 0 else TokenType.NO
                 positions.setdefault(market_id, {})[token_type] = Position(
                     market_id=market_id,
                     market_slug=market_slug,
                     token_type=token_type,
-                    size=size,
-                    avg_entry_price=float(item.get("avgPrice") or item.get("avg_entry_price") or 0.0),
-                    realized_pnl=float(item.get("realizedPnl") or item.get("realized_pnl") or 0.0),
+                    size=abs(net),
+                    avg_entry_price=self._amount_value(item.get("cost")) / abs(net) if abs(net) > 0 else 0.0,
+                    realized_pnl=self._amount_value(item.get("realized") or item.get("realizedPnl")),
                 )
             return positions
         except Exception as exc:
@@ -767,13 +817,19 @@ class PolymarketClient(BasePolymarketClient):
             return order
 
         intent = self._intent_from_order(token_type, side)
+        # API price.value always references YES-side price, even for SHORT intents.
+        api_price = price
+        if token_type == TokenType.NO:
+            api_price = 1.0 - price
+        api_price = max(0.01, min(0.99, api_price))
         payload = {
             "marketSlug": market.market_slug or market.market_id,
             "intent": intent,
             "type": "ORDER_TYPE_LIMIT",
-            "price": {"value": f"{price:.4f}", "currency": "USD"},
+            "price": {"value": f"{api_price:.4f}", "currency": "USD"},
             "quantity": int(max(1, round(size))),
             "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
         }
         try:
             if self._sdk_client:
@@ -802,7 +858,7 @@ class PolymarketClient(BasePolymarketClient):
         if self._sdk_client:
             await self._sdk_client.orders.cancel(order_id)
             return
-        await self._request("DELETE", f"/v1/orders/{order_id}", use_private=True)
+        await self._request("POST", f"/v1/order/{order_id}/cancel", use_private=True)
 
     async def cancel_all_orders(self, market_id: Optional[str] = None) -> int:
         orders = await self.get_open_orders(market_id)
@@ -816,21 +872,24 @@ class PolymarketClient(BasePolymarketClient):
         return cancelled
 
     def _parse_order_status(self, raw_status: Optional[str]) -> OrderStatus:
-        status = (raw_status or "").lower()
+        status = (raw_status or "").lower().replace("order_state_", "")
         mapping = {
             "pending": OrderStatus.PENDING,
+            "pending_new": OrderStatus.PENDING,
+            "pending_risk": OrderStatus.PENDING,
             "open": OrderStatus.OPEN,
             "partially_filled": OrderStatus.PARTIALLY_FILLED,
             "filled": OrderStatus.FILLED,
             "canceled": OrderStatus.CANCELLED,
             "cancelled": OrderStatus.CANCELLED,
+            "replaced": OrderStatus.OPEN,
             "expired": OrderStatus.EXPIRED,
             "rejected": OrderStatus.REJECTED,
         }
         return mapping.get(status, OrderStatus.OPEN)
 
     def _parse_side(self, raw_side: Optional[str]) -> OrderSide:
-        side = (raw_side or "").lower()
+        side = (raw_side or "").lower().replace("order_side_", "")
         if side in {"sell", "ask"}:
             return OrderSide.SELL
         return OrderSide.BUY
@@ -846,7 +905,7 @@ class PolymarketClient(BasePolymarketClient):
             if self._sdk_client:
                 payload = await self._sdk_client.orders.list()
             else:
-                payload = await self._request("GET", "/v1/orders", use_private=True)
+                payload = await self._request("GET", "/v1/orders/open", use_private=True)
             items = self._extract_items(payload, ("orders", "data", "results"))
             parsed: list[Order] = []
             for item in items:
@@ -866,7 +925,7 @@ class PolymarketClient(BasePolymarketClient):
                         price=float(item.get("price", {}).get("value") if isinstance(item.get("price"), dict) else item.get("price") or 0.0),
                         size=float(item.get("quantity") or item.get("size") or 0.0),
                         filled_size=float(item.get("filledQuantity") or item.get("filled_size") or 0.0),
-                        status=self._parse_order_status(item.get("status")),
+                        status=self._parse_order_status(item.get("state") or item.get("status")),
                     )
                 )
             return parsed
@@ -888,25 +947,31 @@ class PolymarketClient(BasePolymarketClient):
             items = self._extract_items(payload, ("activities", "data", "results"))
             trades: list[Trade] = []
             for item in items:
-                if str(item.get("type") or "").lower() not in {"trade", "fill", "order_fill"}:
+                raw_type = str(item.get("type") or "").upper()
+                if raw_type not in {"ACTIVITY_TYPE_TRADE", "TRADE", "FILL", "ORDER_FILL"}:
                     continue
-                market_slug = str(item.get("marketSlug") or item.get("market_slug") or "")
-                resolved_market_id = str(item.get("marketId") or item.get("market_id") or market_slug)
+                trade_obj = item.get("trade") if isinstance(item.get("trade"), dict) else item
+                market_slug = str(trade_obj.get("marketSlug") or trade_obj.get("market_slug") or "")
+                resolved_market_id = str(trade_obj.get("marketId") or trade_obj.get("market_id") or market_slug)
                 if market_id and resolved_market_id != market_id and market_slug != market_id:
                     continue
-                intent = str(item.get("intent") or "")
+                intent = str(trade_obj.get("intent") or "")
                 token_type = TokenType.NO if "SHORT" in intent else TokenType.YES
                 trades.append(
                     Trade(
-                        trade_id=str(item.get("id") or item.get("tradeId") or item.get("trade_id") or ""),
-                        order_id=str(item.get("orderId") or item.get("order_id") or ""),
+                        trade_id=str(trade_obj.get("id") or trade_obj.get("tradeId") or trade_obj.get("trade_id") or ""),
+                        order_id=str(trade_obj.get("orderId") or trade_obj.get("order_id") or ""),
                         market_id=resolved_market_id,
                         market_slug=market_slug,
                         token_type=token_type,
-                        side=self._parse_side(item.get("side") or item.get("direction")),
-                        price=float(item.get("price", {}).get("value") if isinstance(item.get("price"), dict) else item.get("price") or 0.0),
-                        size=float(item.get("quantity") or item.get("size") or 0.0),
-                        fee=float(item.get("fee") or 0.0),
+                        side=self._parse_side(trade_obj.get("side") or trade_obj.get("direction")),
+                        price=float(
+                            trade_obj.get("price", {}).get("value")
+                            if isinstance(trade_obj.get("price"), dict)
+                            else (trade_obj.get("price") or 0.0)
+                        ),
+                        size=float(trade_obj.get("qty") or trade_obj.get("quantity") or trade_obj.get("size") or 0.0),
+                        fee=self._amount_value(trade_obj.get("fee")),
                     )
                 )
             return trades[-max(1, limit) :]

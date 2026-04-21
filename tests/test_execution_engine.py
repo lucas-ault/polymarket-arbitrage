@@ -16,6 +16,9 @@ class DummyClient:
     async def place_order(self, *args, **kwargs):
         raise RuntimeError("not used in this test")
 
+    async def preview_order(self, *args, **kwargs):
+        return {"ok": True}
+
     async def cancel_order(self, *args, **kwargs):
         return None
 
@@ -79,12 +82,16 @@ async def test_cancel_order_passes_market_slug_for_live_cancel():
         side=OrderSide.BUY,
         price=0.5,
         size=1.0,
+        strategy_tag="market_making",
     )
+    cancelled_strategies = []
+    engine.set_cancel_callback(cancelled_strategies.append)
 
     cancelled = await engine.cancel_order("ord-1")
 
     assert cancelled is True
     assert client.calls == [("ord-1", "slug-1")]
+    assert cancelled_strategies == ["market_making"]
 
 
 def test_build_cancel_signal_filters_market_strategy_and_token():
@@ -264,6 +271,114 @@ async def test_ioc_taker_orders_use_short_timeout_and_stats():
     assert engine.stats.taker_orders_attempted == 1
     assert engine.open_order_count == 1
     assert engine._order_timeouts_seconds["ioc-1"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_live_taker_order_preview_rejection_blocks_placement():
+    class RejectingPreviewClient(DummyClient):
+        def __init__(self) -> None:
+            self.place_calls = 0
+
+        async def preview_order(self, *args, **kwargs):
+            raise RuntimeError("preview rejected")
+
+        async def place_order(self, **kwargs):
+            self.place_calls += 1
+            return Order(
+                order_id="should-not-place",
+                market_id=kwargs["market_id"],
+                token_type=kwargs["token_type"],
+                side=kwargs["side"],
+                price=kwargs["price"],
+                size=kwargs["size"],
+                strategy_tag=kwargs.get("strategy_tag", ""),
+            )
+
+    client = RejectingPreviewClient()
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=RiskManager(RiskConfig(trade_only_high_volume=False)),
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    signal = Signal(
+        signal_id="s-preview-reject",
+        action="place_orders",
+        market_id="m-1",
+        orders=[
+            {
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": 0.5,
+                "size": 2.0,
+                "strategy_tag": "taker_entry",
+                "order_type": "ORDER_TYPE_LIMIT",
+                "time_in_force": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+            }
+        ],
+    )
+
+    await engine._handle_place_orders(signal)
+
+    assert client.place_calls == 0
+    assert engine.stats.orders_previewed == 1
+    assert engine.stats.preview_rejections == 1
+    assert engine.stats.signals_rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_multi_market_signal_places_each_leg_on_its_market():
+    class CapturingClient(DummyClient):
+        def __init__(self) -> None:
+            self.markets = []
+
+        async def place_order(self, **kwargs):
+            self.markets.append(kwargs["market_id"])
+            return Order(
+                order_id=f"leg-{len(self.markets)}",
+                market_id=kwargs["market_id"],
+                token_type=kwargs["token_type"],
+                side=kwargs["side"],
+                price=kwargs["price"],
+                size=kwargs["size"],
+                strategy_tag=kwargs.get("strategy_tag", ""),
+            )
+
+    client = CapturingClient()
+    engine = ExecutionEngine(
+        client=client,
+        risk_manager=RiskManager(RiskConfig(trade_only_high_volume=False)),
+        portfolio=Portfolio(initial_balance=1000.0),
+        config=ExecutionConfig(dry_run=False),
+    )
+    signal = Signal(
+        signal_id="s-event-bundle",
+        action="place_orders",
+        market_id="m-primary",
+        orders=[
+            {
+                "market_id": "m-1",
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": 0.42,
+                "size": 1.0,
+                "strategy_tag": "event_bundle_arb",
+            },
+            {
+                "market_id": "m-2",
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": 0.44,
+                "size": 1.0,
+                "strategy_tag": "event_bundle_arb",
+            },
+        ],
+    )
+
+    await engine._handle_place_orders(signal)
+
+    assert client.markets == ["m-1", "m-2"]
+    assert engine.open_order_count == 2
 
 
 @pytest.mark.asyncio

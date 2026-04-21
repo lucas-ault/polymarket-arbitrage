@@ -118,3 +118,50 @@ def test_register_market_state_updates_volume_and_freshness(base_config):
 
     assert rm._market_volumes["m1"] == 50_000.0  # noqa: SLF001
     assert "m1" in rm._market_freshness  # noqa: SLF001
+
+
+def test_exchange_health_gate_blocks_new_risk_orders():
+    cfg = RiskConfig(
+        max_position_per_market=100.0,
+        max_global_exposure=10_000.0,
+        max_daily_loss=100.0,
+        max_drawdown_pct=0.5,
+        trade_only_high_volume=False,
+        kill_switch_enabled=True,
+        exchange_health_gate_enabled=True,
+        exchange_health_grace_seconds=0.0,
+        max_private_ws_silence_seconds=1.0,
+        max_markets_ws_silence_seconds=0.0,
+        max_markets_rest_fallback_seconds=0.0,
+        max_backpressure_events=0,
+    )
+    rm = RiskManager(cfg)
+    rm.update_exchange_health({"private_ws_last_message_ts": 0.0})
+
+    assert rm.check_order(_order("m1")) is False
+    assert rm.get_summary()["exchange_health_rejections"] == 1
+
+
+def test_exchange_health_gate_allows_reduce_only_order_when_enabled():
+    cfg = RiskConfig(
+        max_position_per_market=100.0,
+        max_global_exposure=10_000.0,
+        max_daily_loss=100.0,
+        max_drawdown_pct=0.5,
+        trade_only_high_volume=False,
+        kill_switch_enabled=True,
+        exchange_health_gate_enabled=True,
+        exchange_health_grace_seconds=0.0,
+        max_private_ws_silence_seconds=1.0,
+        max_markets_ws_silence_seconds=0.0,
+        max_markets_rest_fallback_seconds=0.0,
+        max_backpressure_events=0,
+        allow_reduce_only_on_exchange_degradation=True,
+    )
+    rm = RiskManager(cfg)
+    rm.update_exchange_health({"private_ws_last_message_ts": 0.0})
+    rm.update_position("m1", TokenType.YES, 5.0, 0.5)
+
+    reduce_only_sell = _order("m1", side=OrderSide.SELL)
+    reduce_only_sell.size = 2.0
+    assert rm.check_order(reduce_only_sell) is True

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from utils.config_loader import ConfigError, load_config
+from utils.config_loader import ConfigError, load_config, validate_config_for_run
 
 
 def _write_config(path: Path, body: str) -> None:
@@ -128,3 +128,27 @@ trading:
     )
     with pytest.raises(ConfigError):
         load_config(str(config_path))
+
+
+def test_validate_config_for_run_catches_live_override_without_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("POLYMARKET_KEY_ID", "")
+    monkeypatch.setenv("POLYMARKET_SECRET_KEY", "")
+    config_path = tmp_path / "config.yaml"
+    _write_config(
+        config_path,
+        """
+mode:
+  trading_mode: dry_run
+api:
+  key_id: ""
+  secret_key: ""
+""",
+    )
+
+    config = load_config(str(config_path))
+    config.mode.trading_mode = "live"
+    with pytest.raises(ConfigError):
+        validate_config_for_run(config)

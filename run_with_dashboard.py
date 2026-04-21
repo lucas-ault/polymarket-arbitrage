@@ -34,7 +34,7 @@ from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine
 from utils.bootstrap import bootstrap_components
-from utils.config_loader import load_config, BotConfig
+from utils.config_loader import load_config, BotConfig, validate_config_for_run
 from utils.logging_utils import setup_logging, trade_logger
 from utils.profit_telemetry import ProfitTelemetry
 from utils.redis_cache import RedisCacheConfig, create_cache_store
@@ -87,6 +87,7 @@ class TradingBotWithDashboard:
         self._seen_trade_ids: set[str] = set()
         self._live_fill_bootstrapped = False
         self.auto_take_profit_monitor: AutoTakeProfitMonitor | None = None
+        self._last_health_maker_cancel_at: datetime | None = None
     
     async def start(self) -> None:
         """Start the bot and dashboard."""
@@ -120,6 +121,7 @@ class TradingBotWithDashboard:
         self.arb_engine = components.arb_engine
         self.data_feed = components.data_feed
         self.profit_telemetry = ProfitTelemetry()
+        self.execution_engine.set_cancel_callback(self.profit_telemetry.record_cancel)
         self.auto_take_profit_monitor = AutoTakeProfitMonitor(
             AutoTakeProfitConfig(
                 enabled=bool(self.config.trading.auto_take_profit_enabled),
@@ -252,8 +254,10 @@ class TradingBotWithDashboard:
             return
 
         self._mark_portfolio_to_market(market_id, market_state)
+        self._record_market_snapshot_for_telemetry(market_id, market_state)
         if self.auto_take_profit_monitor:
             self.auto_take_profit_monitor.maybe_submit_for_market(market_id, market_state)
+        self._refresh_exchange_health_gate()
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():
@@ -261,8 +265,12 @@ class TradingBotWithDashboard:
         
         # Analyze for opportunities
         signals = self.arb_engine.analyze(market_state)
+        freshness_bucket = self._freshness_bucket()
         
         for signal in signals:
+            for order_spec in list(getattr(signal, "orders", []) or []):
+                if isinstance(order_spec, dict):
+                    order_spec.setdefault("freshness_bucket", freshness_bucket)
             # Add to dashboard
             if signal.opportunity:
                 self.dashboard_integration.add_opportunity(
@@ -272,16 +280,91 @@ class TradingBotWithDashboard:
                     suggested_size=signal.opportunity.suggested_size,
                 )
                 if self.profit_telemetry:
+                    strategy_tag = self._signal_strategy_tag(signal)
                     self.profit_telemetry.record_opportunity(
                         market_id=signal.market_id,
-                        strategy=signal.opportunity.opportunity_type.value,
+                        strategy=strategy_tag,
                         edge=float(signal.opportunity.edge),
-                        fee_bps=self.config.trading.taker_fee_bps,
+                        fee_bps=self._strategy_fee_bps(strategy_tag),
+                        quote_freshness=freshness_bucket,
                     )
             
             # Submit to execution
             if not self.execution_engine.submit_signal_nowait(signal):
                 logger.warning("Execution queue full; dropping dashboard signal %s", signal.signal_id)
+
+    @staticmethod
+    def _signal_strategy_tag(signal) -> str:
+        for spec in list(getattr(signal, "orders", []) or []):
+            if isinstance(spec, dict):
+                tag = str(spec.get("strategy_tag", "") or "").strip()
+                if tag:
+                    return tag
+        if signal.opportunity is not None:
+            return str(signal.opportunity.opportunity_type.value)
+        return "unknown"
+
+    def _strategy_fee_bps(self, strategy_tag: str) -> float:
+        tag = str(strategy_tag or "").strip().lower()
+        if tag == "market_making":
+            return float(self.config.trading.maker_fee_bps)
+        return float(self.config.trading.taker_fee_bps)
+
+    def _freshness_bucket(self) -> str:
+        if not self.client:
+            return "unknown"
+        stats = self.client.get_runtime_stats()
+        if bool(int(stats.get("markets_rest_fallback_active", 0) or 0)):
+            return "fallback"
+        if self.risk_manager and self.risk_manager.exchange_health_degraded():
+            return "degraded"
+        return "fresh"
+
+    def _record_market_snapshot_for_telemetry(self, market_id: str, market_state) -> None:
+        if not self.profit_telemetry:
+            return
+        prices = self._estimate_token_mark_prices(market_state)
+        if not prices:
+            return
+        yes_price, no_price = prices
+        self.profit_telemetry.record_market_snapshot(
+            market_id=market_id,
+            yes_price=yes_price,
+            no_price=no_price,
+        )
+
+    def _refresh_exchange_health_gate(self) -> None:
+        if not self.client or not self.risk_manager:
+            return
+        try:
+            self.risk_manager.update_exchange_health(self.client.get_runtime_stats())
+        except Exception as exc:
+            logger.debug("Failed to refresh exchange health stats: %s", exc)
+            return
+        if self.risk_manager.exchange_health_degraded():
+            self._maybe_cancel_maker_quotes_on_degradation()
+
+    def _maybe_cancel_maker_quotes_on_degradation(self) -> None:
+        if not self.execution_engine:
+            return
+        now = datetime.utcnow()
+        if self._last_health_maker_cancel_at is not None:
+            if (now - self._last_health_maker_cancel_at).total_seconds() < 15.0:
+                return
+        self._last_health_maker_cancel_at = now
+
+        async def _cancel_mm() -> None:
+            try:
+                cancelled = await self.execution_engine.cancel_orders_by_strategy("market_making")
+                if cancelled:
+                    logger.warning(
+                        "Exchange health degraded; cancelled %d market-making order(s)",
+                        cancelled,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to cancel maker quotes during degradation: %s", exc)
+
+        asyncio.create_task(_cancel_mm(), name="dashboard_cancel_mm_on_health_degradation")
 
     @staticmethod
     def _pick_mark_price(best_bid: float | None, best_ask: float | None, fallback: float | None) -> float | None:
@@ -354,13 +437,20 @@ class TradingBotWithDashboard:
                     if random.random() < self.config.mode.fill_probability:
                         trade = self.client.simulate_fill(order.order_id)
                         if trade:
-                            self.execution_engine.handle_fill(trade)
+                            fill_ctx = self.execution_engine.handle_fill(trade)
                             if self.profit_telemetry:
                                 self.profit_telemetry.record_fill(
                                     market_id=trade.market_id,
                                     price=float(trade.price),
                                     size=float(trade.size),
                                     fee=float(trade.fee),
+                                    strategy=str(fill_ctx.get("strategy_tag") or "unknown"),
+                                    expected_edge=fill_ctx.get("expected_edge"),
+                                    realized_edge=fill_ctx.get("realized_edge"),
+                                    quote_freshness=str(fill_ctx.get("freshness_bucket") or "unknown"),
+                                    token_type=trade.token_type,
+                                    side=trade.side,
+                                    timestamp=getattr(trade, "timestamp", None),
                                 )
                             self.dashboard_integration.add_trade(
                                 side=trade.side.value,
@@ -390,6 +480,7 @@ class TradingBotWithDashboard:
                 await asyncio.sleep(interval)
                 if not self._running:
                     break
+                self._refresh_exchange_health_gate()
 
                 markets_tracked = (
                     len(self.data_feed._markets) if self.data_feed else 0
@@ -568,13 +659,20 @@ class TradingBotWithDashboard:
         if trade.trade_id in self._seen_trade_ids:
             return
         self._seen_trade_ids.add(trade.trade_id)
-        self.execution_engine.handle_fill(trade)
+        fill_ctx = self.execution_engine.handle_fill(trade)
         if self.profit_telemetry:
             self.profit_telemetry.record_fill(
                 market_id=trade.market_id,
                 price=float(trade.price),
                 size=float(trade.size),
                 fee=float(trade.fee),
+                strategy=str(fill_ctx.get("strategy_tag") or "unknown"),
+                expected_edge=fill_ctx.get("expected_edge"),
+                realized_edge=fill_ctx.get("realized_edge"),
+                quote_freshness=str(fill_ctx.get("freshness_bucket") or "unknown"),
+                token_type=trade.token_type,
+                side=trade.side,
+                timestamp=getattr(trade, "timestamp", None),
             )
         if self.dashboard_integration:
             self.dashboard_integration.add_trade(
@@ -594,6 +692,7 @@ class TradingBotWithDashboard:
                 async for event in self.client.stream_private_updates():
                     if not self._running:
                         break
+                    self._refresh_exchange_health_gate()
                     event_type = str(event.get("type") or "")
                     if event_type == "order_update":
                         trade = event.get("trade")
@@ -603,6 +702,7 @@ class TradingBotWithDashboard:
                 break
             except Exception as exc:
                 logger.warning("Private websocket consumer error: %s", exc)
+                self._refresh_exchange_health_gate()
                 await asyncio.sleep(1.0)
 
     async def _sync_live_portfolio_metrics(self) -> None:
@@ -1046,9 +1146,11 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "live"
     elif args.dry_run:
         config.mode.trading_mode = "dry_run"
-    if config.is_live and config.mode.simulate_fills:
-        logger.warning("simulate_fills is enabled but trading_mode is live; forcing simulate_fills=false")
-        config.mode.simulate_fills = False
+    try:
+        config = validate_config_for_run(config)
+    except Exception as e:
+        logger.error(f"Invalid runtime config after CLI overrides: {e}")
+        sys.exit(1)
 
     # Configure logging from config (with CLI verbose override for console output)
     console_level = "DEBUG" if args.verbose else config.logging.console_level

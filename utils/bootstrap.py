@@ -64,6 +64,13 @@ def _build_risk_manager(config: BotConfig) -> RiskManager:
         auto_unwind_on_breach=config.risk.auto_unwind_on_breach,
         allow_urgent_exit_after_kill_switch=config.risk.allow_urgent_exit_after_kill_switch,
         allow_urgent_exit_on_stale_data=config.risk.allow_urgent_exit_on_stale_data,
+        exchange_health_gate_enabled=(config.risk.exchange_health_gate_enabled and config.is_live),
+        exchange_health_grace_seconds=config.risk.exchange_health_grace_seconds,
+        max_private_ws_silence_seconds=config.risk.max_private_ws_silence_seconds,
+        max_markets_ws_silence_seconds=config.risk.max_markets_ws_silence_seconds,
+        max_markets_rest_fallback_seconds=config.risk.max_markets_rest_fallback_seconds,
+        max_backpressure_events=config.risk.max_backpressure_events,
+        allow_reduce_only_on_exchange_degradation=config.risk.allow_reduce_only_on_exchange_degradation,
     ))
 
 
@@ -153,6 +160,12 @@ async def bootstrap_components(
             order_timeout_seconds=config.trading.order_timeout_seconds,
             mm_order_timeout_seconds=config.trading.mm_order_timeout_seconds,
             unplaceable_market_skip_seconds=config.trading.unplaceable_market_skip_seconds,
+            preview_live_orders=config.trading.preview_live_orders,
+            preview_taker_orders=config.trading.preview_taker_orders,
+            preview_bundle_orders=config.trading.preview_bundle_orders,
+            preview_urgent_exit_orders=config.trading.preview_urgent_exit_orders,
+            preview_other_orders=config.trading.preview_other_orders,
+            preview_maker_min_notional=config.trading.preview_maker_min_notional,
             dry_run=config.is_dry_run,
         ),
     )

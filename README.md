@@ -127,22 +127,33 @@ Recommended safe starting point:
 ```yaml
 mode:
   trading_mode: "dry_run"
-  data_mode: "simulation"
+  data_mode: "real"
+  cross_platform_enabled: false
+  kalshi_enabled: false
 
 trading:
-  bundle_arb_enabled: true
+  bundle_arb_enabled: false
+  event_bundle_arb_enabled: false
   mm_enabled: false
+  taker_enabled: false
 
 risk:
   max_position_per_market: 15
   max_global_exposure: 50
   max_daily_loss: 10
+  exchange_health_gate_enabled: true
 ```
 
 For full observation mode (dashboard + real market data + auto-discovery), use:
 
 ```bash
 python run_with_dashboard.py -c config.observation.yaml
+```
+
+For event-bundle paper trading (long-only YES baskets across multi-outcome events), use:
+
+```bash
+python run_with_dashboard.py -c config.event_bundle.paper.yaml
 ```
 
 Optional Redis warm cache (disabled by default):
@@ -213,6 +224,8 @@ Important implementation notes:
 
 - `api.use_websocket` enables signed market WebSocket subscriptions (`/v1/ws/markets`)
 - `api.use_rest_fallback` enables automatic polling fallback if websocket streaming fails
+- live orders can be previewed with `POST /v1/order/preview` before submission
+- risk can gate non-reduce-only live orders on private WS silence, prolonged REST fallback, and API backpressure
 - fee modeling uses the published polymarket.us formula `theta * contracts * p * (1 - p)`
 - `monitoring.heartbeat_interval` is defined but not used in the runtime loop
 - real-data feed tuning now comes from `monitoring.orderbook_*` fields (batch size, concurrency, and rotation delays)
@@ -246,6 +259,8 @@ What is **not** currently wired end-to-end:
 - live cross-platform opportunity generation inside `_on_market_update`
 - Kalshi order execution
 - automated Polymarket <-> Kalshi hedged execution
+
+Current default posture keeps cross-platform disabled until those paths are implemented.
 
 ## Testing
 Unit tests:

@@ -237,6 +237,8 @@ class DashboardIntegration:
                 "taker_orders_rejected": stats.taker_orders_rejected,
                 "urgent_exit_attempted": stats.urgent_exit_attempted,
                 "urgent_exit_rejected": stats.urgent_exit_rejected,
+                "orders_previewed": stats.orders_previewed,
+                "preview_rejections": stats.preview_rejections,
             }
         
         # Update arb stats and timing
@@ -322,6 +324,14 @@ class DashboardIntegration:
                 "market_discovery_batches": int(client_stats.get("market_discovery_batches", 0)),
                 "market_discovery_duration_ms": client_stats.get("market_discovery_duration_ms", 0.0),
                 "orderbook_rotations": int(client_stats.get("orderbook_rotations", 0)),
+                "markets_ws_active": bool(int(client_stats.get("markets_ws_active", 0))),
+                "markets_rest_fallback_active": bool(
+                    int(client_stats.get("markets_rest_fallback_active", 0))
+                ),
+                "markets_ws_last_message_ts": client_stats.get("markets_ws_last_message_ts", 0.0),
+                "private_ws_connected": bool(int(client_stats.get("private_ws_connected", 0))),
+                "private_ws_last_message_ts": client_stats.get("private_ws_last_message_ts", 0.0),
+                "api_backpressure_events": int(client_stats.get("api_backpressure_events", 0)),
                 "last_rotation_duration_ms": client_stats.get("last_rotation_duration_ms", 0.0),
                 "avg_rotation_duration_ms": client_stats.get("avg_rotation_duration_ms", 0.0),
                 "max_rotation_duration_ms": client_stats.get("max_rotation_duration_ms", 0.0),

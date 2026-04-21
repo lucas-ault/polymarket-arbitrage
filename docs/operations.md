@@ -67,7 +67,11 @@ Before flipping `trading_mode` to `live`, confirm the following:
    forward live `volume_24h` into the risk manager automatically.
 6. **Strategy economics.** Configured `min_edge` exceeds the worst-case sum of
    maker/taker fees, expected slippage, and a margin of safety.
-7. **Telemetry baseline.** A paper-trading run (see below) shows positive
+7. **Order preview.** `trading.preview_live_orders=true` and strategy-specific
+   preview knobs are set for any strategy you plan to run live.
+8. **Exchange health gate.** `risk.exchange_health_gate_enabled=true` with sane
+   silence/fallback thresholds for your network conditions.
+9. **Telemetry baseline.** A paper-trading run (see below) shows positive
    post-fee expectancy for the strategy you intend to run.
 
 ## Recommended Validation Progression
@@ -85,13 +89,14 @@ Use to verify changes do not crash, queues do not stall, and unit tests pass.
 ### Stage 2 — `dry_run` + `real` (paper trading)
 
 ```bash
-python run_with_dashboard.py -c config.observation.yaml
+python run_with_dashboard.py -c config.event_bundle.paper.yaml
 ```
 
 This is the canonical "paper trading" configuration:
 
 - `trading_mode=dry_run`, `data_mode=real`.
-- Full market discovery, conservative risk limits.
+- Binary bundle/MM/taker/cross-platform disabled by default.
+- Event-bundle long-only enabled in `config.event_bundle.paper.yaml`.
 - Dashboard exposes signal counts, opportunity edge histograms, fill simulation,
   and operational health.
 
@@ -151,10 +156,15 @@ The risk manager and data feed cooperate to degrade safely:
 - `RiskManager.register_market_state(MarketState)` records the latest book
   freshness for that market. `check_order` rejects orders whose underlying
   market has gone stale beyond `max_market_staleness_seconds`.
+- `RiskManager.update_exchange_health(...)` gates non-reduce-only orders when
+  private WS is silent, markets WS is stale, REST fallback persists too long, or
+  API backpressure crosses threshold.
 - When the kill switch trips, `RiskManager` invokes the registered
   `on_kill_switch` callback. `run_with_dashboard.py` and `main.py` register that
   callback to call `ExecutionEngine.cancel_all_orders` whenever
   `risk.auto_unwind_on_breach=true`.
+- When exchange-health gating degrades, the runtime proactively cancels
+  `market_making` quotes and keeps reduce-only exits available.
 - The execution engine will not place new orders while
   `RiskManager.within_global_limits()` is `false`.
 

@@ -13,20 +13,19 @@ api:
   retry_delay_seconds: 1
 
 trading:
-  # Empty list means full auto-discovery from polymarket.us.
   markets: []
-  min_edge: 0.005
+  min_edge: 0.01
   bundle_arb_enabled: false
-  event_bundle_arb_enabled: false
-  min_spread: 0.01
-  tick_size: 0.01
+  event_bundle_arb_enabled: true
   mm_enabled: false
   taker_enabled: false
-  default_order_size: 1
+  min_spread: 0.05
+  tick_size: 0.01
+  default_order_size: 2
   min_order_size: 1
-  max_order_size: 1
-  slippage_tolerance: 0.01
-  order_timeout_seconds: 60
+  max_order_size: 2
+  slippage_tolerance: 0.02
+  order_timeout_seconds: 45
   fee_mode: "polymarket_us"
   maker_fee_bps: -125
   taker_fee_bps: 500
@@ -34,16 +33,16 @@ trading:
   fee_theta_maker: -0.0125
 
 risk:
-  max_position_per_market: 2
-  max_global_exposure: 10
-  max_daily_loss: 1.5
+  max_position_per_market: 10
+  max_global_exposure: 30
+  max_daily_loss: 5
   max_drawdown_pct: 0.10
   trade_only_high_volume: false
   min_24h_volume: 0
   whitelist: []
   blacklist: []
   kill_switch_enabled: true
-  auto_unwind_on_breach: false
+  auto_unwind_on_breach: true
   exchange_health_gate_enabled: true
   exchange_health_grace_seconds: 20
   max_private_ws_silence_seconds: 45
@@ -57,11 +56,7 @@ mode:
   data_mode: "real"
   cross_platform_enabled: false
   kalshi_enabled: false
-  min_match_similarity: 0.78
-  cross_platform_match_start_delay_seconds: 5.0
-  cross_platform_match_process_workers: 3
-  cross_platform_candidate_limit: 220
-  dry_run_initial_balance: 10
+  dry_run_initial_balance: 100
   simulate_fills: true
   fill_probability: 0.2
 

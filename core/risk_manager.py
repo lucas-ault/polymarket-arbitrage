@@ -49,6 +49,14 @@ class RiskConfig:
     allow_urgent_exit_after_kill_switch: bool = True
     # Allow reduce-only urgent exits even when market freshness is stale.
     allow_urgent_exit_on_stale_data: bool = True
+    # Exchange-health gating for live mode.
+    exchange_health_gate_enabled: bool = False
+    exchange_health_grace_seconds: float = 20.0
+    max_private_ws_silence_seconds: float = 45.0
+    max_markets_ws_silence_seconds: float = 60.0
+    max_markets_rest_fallback_seconds: float = 45.0
+    max_backpressure_events: int = 3
+    allow_reduce_only_on_exchange_degradation: bool = True
 
 
 KillSwitchCallback = Callable[[str], Union[None, Awaitable[None]]]
@@ -90,10 +98,18 @@ class RiskManager:
         # Counters for observability. Tests and the dashboard read these.
         self._stale_market_rejections: int = 0
         self._volume_rejections: int = 0
+        self._exchange_health_rejections: int = 0
         # Optional callback fired the first time the kill switch trips. Used by
         # the runtime to cancel resting orders when auto_unwind_on_breach=True.
         self._on_kill_switch: Optional[KillSwitchCallback] = None
         self._kill_switch_callback_fired: bool = False
+        self._exchange_health_started_at: datetime = datetime.utcnow()
+        self._exchange_health_last_update: Optional[datetime] = None
+        self._markets_ws_last_seen: Optional[datetime] = None
+        self._private_ws_last_seen: Optional[datetime] = None
+        self._markets_rest_fallback_active: bool = False
+        self._markets_rest_fallback_since: Optional[datetime] = None
+        self._api_backpressure_events: int = 0
         
         # Trading session tracking
         self._session_start = datetime.utcnow()
@@ -167,6 +183,15 @@ class RiskManager:
                         self.config.max_market_staleness_seconds,
                     )
                     return False
+
+        exchange_health_reason = self._exchange_health_block_reason(order)
+        if exchange_health_reason is not None:
+            self._exchange_health_rejections += 1
+            logger.warning(
+                "Order rejected: exchange health gate active (%s)",
+                exchange_health_reason,
+            )
+            return False
         
         # Per-market exposure check (count only incremental absolute exposure).
         current_market_exposure = self._market_exposure.get(order.market_id, 0.0)
@@ -246,6 +271,102 @@ class RiskManager:
 
     def _is_reduce_only_order(self, order: Order) -> bool:
         return self._estimate_incremental_exposure(order) <= 0
+
+    @staticmethod
+    def _datetime_from_ts(raw_ts: float | int | None) -> Optional[datetime]:
+        try:
+            ts = float(raw_ts or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if ts <= 0:
+            return None
+        return datetime.utcfromtimestamp(ts)
+
+    def update_exchange_health(self, runtime_stats: dict[str, float]) -> None:
+        """Update exchange connectivity/backpressure state from client runtime stats."""
+        now = datetime.utcnow()
+        self._exchange_health_last_update = now
+        self._markets_ws_last_seen = self._datetime_from_ts(
+            runtime_stats.get("markets_ws_last_message_ts")
+        )
+        self._private_ws_last_seen = self._datetime_from_ts(
+            runtime_stats.get("private_ws_last_message_ts")
+        )
+        self._api_backpressure_events = int(runtime_stats.get("api_backpressure_events", 0) or 0)
+        rest_fallback_active = bool(
+            int(runtime_stats.get("markets_rest_fallback_active", 0) or 0)
+        )
+        if rest_fallback_active and not self._markets_rest_fallback_active:
+            self._markets_rest_fallback_since = now
+        if not rest_fallback_active:
+            self._markets_rest_fallback_since = None
+        self._markets_rest_fallback_active = rest_fallback_active
+
+    def _exchange_health_block_reason(self, order: Order) -> Optional[str]:
+        if not self.config.exchange_health_gate_enabled:
+            return None
+
+        now = datetime.utcnow()
+        grace_seconds = max(0.0, float(self.config.exchange_health_grace_seconds))
+        if (now - self._exchange_health_started_at).total_seconds() < grace_seconds:
+            return None
+
+        if self._is_reduce_only_order(order) and self.config.allow_reduce_only_on_exchange_degradation:
+            return None
+
+        private_threshold = max(0.0, float(self.config.max_private_ws_silence_seconds))
+        if private_threshold > 0:
+            if self._private_ws_last_seen is None:
+                return "private_ws_missing"
+            private_silence = (now - self._private_ws_last_seen).total_seconds()
+            if private_silence > private_threshold:
+                return (
+                    f"private_ws_silent_{private_silence:.1f}s>"
+                    f"{private_threshold:.1f}s"
+                )
+
+        markets_ws_threshold = max(0.0, float(self.config.max_markets_ws_silence_seconds))
+        if markets_ws_threshold > 0:
+            if self._markets_ws_last_seen is None:
+                return "markets_ws_missing"
+            markets_silence = (now - self._markets_ws_last_seen).total_seconds()
+            if markets_silence > markets_ws_threshold:
+                return (
+                    f"markets_ws_silent_{markets_silence:.1f}s>"
+                    f"{markets_ws_threshold:.1f}s"
+                )
+
+        rest_threshold = max(0.0, float(self.config.max_markets_rest_fallback_seconds))
+        if rest_threshold > 0 and self._markets_rest_fallback_active:
+            if self._markets_rest_fallback_since is None:
+                return "markets_rest_fallback_active"
+            rest_duration = (now - self._markets_rest_fallback_since).total_seconds()
+            if rest_duration > rest_threshold:
+                return (
+                    f"markets_rest_fallback_{rest_duration:.1f}s>"
+                    f"{rest_threshold:.1f}s"
+                )
+
+        backpressure_threshold = int(max(0, self.config.max_backpressure_events))
+        if backpressure_threshold > 0 and self._api_backpressure_events >= backpressure_threshold:
+            return (
+                f"api_backpressure_events_{self._api_backpressure_events}>="
+                f"{backpressure_threshold}"
+            )
+
+        return None
+
+    def exchange_health_degraded(self) -> bool:
+        """Whether exchange-health gate would block a non-reduce-only order."""
+        probe = Order(
+            order_id="probe",
+            market_id="probe",
+            token_type=TokenType.YES,
+            side=OrderSide.BUY,
+            price=0.5,
+            size=1.0,
+        )
+        return self._exchange_health_block_reason(probe) is not None
     
     def update_position(
         self,
@@ -422,12 +543,23 @@ class RiskManager:
             "within_limits": self.within_global_limits(),
             "auto_unwind_on_breach": self.config.auto_unwind_on_breach,
             "stale_market_rejections": self._stale_market_rejections,
+            "exchange_health_rejections": self._exchange_health_rejections,
             "volume_rejections": self._volume_rejections,
             "max_market_staleness_seconds": self.config.max_market_staleness_seconds,
             "trade_only_high_volume": self.config.trade_only_high_volume,
             "min_24h_volume": self.config.min_24h_volume,
             "tracked_market_volumes": len(self._market_volumes),
             "tracked_market_freshness": len(self._market_freshness),
+            "exchange_health_gate_enabled": self.config.exchange_health_gate_enabled,
+            "exchange_health_degraded": self.exchange_health_degraded(),
+            "markets_rest_fallback_active": self._markets_rest_fallback_active,
+            "api_backpressure_events": self._api_backpressure_events,
+            "last_private_ws_update_ts": (
+                self._private_ws_last_seen.timestamp() if self._private_ws_last_seen else 0.0
+            ),
+            "last_markets_ws_update_ts": (
+                self._markets_ws_last_seen.timestamp() if self._markets_ws_last_seen else 0.0
+            ),
         }
     
     def add_to_blacklist(self, market_id: str) -> None:

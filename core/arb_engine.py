@@ -130,6 +130,8 @@ class ArbStats:
     # explicit to the operator.
     bundle_skipped_synthetic_no: int = 0
     bundle_skipped_no_edge: int = 0
+    event_bundle_scans_total: int = 0
+    event_bundle_opportunities_detected: int = 0
     # Best (=largest) gross edge observed across all scans this session.
     # gross = (1 - total_ask) for long, (total_bid - 1) for short. Negative
     # means the order book was wider than $1.00, i.e. nowhere near an arb.
@@ -166,6 +168,8 @@ class ArbEngine:
         # Track active opportunities for duration measurement
         self._active_opportunities: dict[str, OpportunityTiming] = {}
         self._opportunity_history: list[OpportunityTiming] = []
+        self._latest_market_states: dict[str, MarketState] = {}
+        self._event_markets: dict[str, set[str]] = {}
 
         # Optional inventory probe. When set, MM is suppressed on (market,
         # token_type) pairs we already have positions in. Wired by bootstrap
@@ -222,6 +226,10 @@ class ArbEngine:
         
         order_book = market_state.order_book
         market_id = market_state.market.market_id
+        event_id = str(getattr(market_state.market, "event_id", "") or "").strip()
+        self._latest_market_states[market_id] = market_state
+        if event_id:
+            self._event_markets.setdefault(event_id, set()).add(market_id)
         
         # Check if previously tracked opportunities have expired
         self._check_expired_opportunities(market_id, order_book)
@@ -231,6 +239,11 @@ class ArbEngine:
             bundle_signal = self._check_bundle_arbitrage(market_id, order_book)
             if bundle_signal:
                 signals.append(bundle_signal)
+
+        if self.config.event_bundle_arb_enabled and event_id:
+            event_bundle_signal = self._check_event_bundle_arbitrage(event_id)
+            if event_bundle_signal:
+                signals.append(event_bundle_signal)
         
         # Check for market-making opportunities
         if self.config.mm_enabled:
@@ -545,7 +558,6 @@ class ArbEngine:
                 f"Bundle SHORT opportunity: {market_id} | "
                 f"total_bid={total_bid:.4f} | gross={gross_edge_short:.4f} | "
                 f"fees={fee_cost_short:.4f} | NET edge={edge:.4f} | size={suggested_size:.2f}"
-                f"total_bid={total_bid:.4f} | edge={edge:.4f} | size={suggested_size:.2f}"
             )
         
         if not opportunity:
@@ -618,6 +630,111 @@ class ArbEngine:
             priority=10,  # High priority for arb
         )
         
+        self.stats.signals_generated += 1
+        return signal
+
+    def _check_event_bundle_arbitrage(self, event_id: str) -> Optional[Signal]:
+        """Check long-only event bundle edge across all YES outcomes for an event."""
+        market_ids = sorted(self._event_markets.get(event_id, set()))
+        if len(market_ids) < 2:
+            return None
+
+        legs: list[tuple[str, MarketState, float, float]] = []
+        for market_id in market_ids:
+            state = self._latest_market_states.get(market_id)
+            if state is None:
+                continue
+            market = state.market
+            if bool(getattr(market, "closed", False)) or bool(getattr(market, "resolved", False)):
+                continue
+            ask_yes = state.order_book.best_ask_yes
+            if ask_yes is None or ask_yes <= 0:
+                continue
+            ask_size = float(state.order_book.yes.best_ask_size or 0.0)
+            legs.append((market_id, state, float(ask_yes), ask_size))
+
+        if len(legs) < 2:
+            return None
+
+        self.stats.event_bundle_scans_total += 1
+        total_ask_yes = sum(ask for _, _, ask, _ in legs)
+        fee_cost = sum(self._estimate_taker_fee(ask) for _, _, ask, _ in legs)
+        edge = (1.0 - total_ask_yes) - fee_cost
+        if edge < self.config.min_edge:
+            return None
+
+        cooldown_key = f"event_{event_id}_{OpportunityType.EVENT_BUNDLE_LONG.value}"
+        if cooldown_key in self._opportunity_cooldown:
+            if datetime.utcnow() < self._opportunity_cooldown[cooldown_key]:
+                return None
+
+        sized_legs = [size for _, _, _, size in legs if size > 0]
+        max_size = min(sized_legs) if sized_legs else float(self.config.max_order_size)
+        suggested_size = min(
+            float(self.config.max_order_size),
+            max(float(self.config.min_order_size), float(self.config.default_order_size)),
+        )
+        suggested_size = min(suggested_size, float(max_size))
+        if suggested_size < float(self.config.min_order_size):
+            return None
+
+        primary_market_id = legs[0][0]
+        opportunity = Opportunity(
+            opportunity_id=f"event_bundle_long_{event_id}_{uuid.uuid4().hex[:8]}",
+            opportunity_type=OpportunityType.EVENT_BUNDLE_LONG,
+            market_id=primary_market_id,
+            edge=edge,
+            best_ask_yes=total_ask_yes,
+            suggested_size=suggested_size,
+            max_size=max_size,
+            expires_at=datetime.utcnow() + timedelta(seconds=self.config.signal_expiry_seconds),
+        )
+        self._opportunity_cooldown[cooldown_key] = datetime.utcnow() + timedelta(seconds=2)
+        self._recent_opportunities[opportunity.opportunity_id] = opportunity
+        self.stats.bundle_opportunities_detected += 1
+        self.stats.event_bundle_opportunities_detected += 1
+        self.stats.last_opportunity_time = datetime.utcnow()
+        self._start_tracking_opportunity(opportunity)
+
+        logger.info(
+            "Event-bundle LONG opportunity: event=%s | outcomes=%d | total_yes_ask=%.4f | "
+            "fees=%.4f | net_edge=%.4f | size=%.2f",
+            event_id,
+            len(legs),
+            total_ask_yes,
+            fee_cost,
+            edge,
+            suggested_size,
+        )
+        return self._create_event_bundle_signal(opportunity, event_id, legs)
+
+    def _create_event_bundle_signal(
+        self,
+        opportunity: Opportunity,
+        event_id: str,
+        legs: list[tuple[str, MarketState, float, float]],
+    ) -> Signal:
+        """Create a multi-market long-only event-bundle signal."""
+        orders = [
+            {
+                "market_id": market_id,
+                "token_type": TokenType.YES,
+                "side": OrderSide.BUY,
+                "price": ask_yes,
+                "size": opportunity.suggested_size,
+                "strategy_tag": "event_bundle_arb",
+                "quote_group_id": f"event_bundle::{event_id}",
+            }
+            for market_id, _state, ask_yes, _ask_size in legs
+        ]
+        signal = Signal(
+            signal_id=f"sig_{uuid.uuid4().hex[:12]}",
+            action="place_orders",
+            market_id=opportunity.market_id,
+            opportunity=opportunity,
+            orders=orders,
+            priority=10,
+        )
         self.stats.signals_generated += 1
         return signal
 

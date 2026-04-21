@@ -191,6 +191,8 @@ async def test_update_state_includes_mm_and_unplaceable_operational_metrics():
                     "taker_orders_rejected": 1,
                     "urgent_exit_attempted": 3,
                     "urgent_exit_rejected": 0,
+                    "orders_previewed": 4,
+                    "preview_rejections": 1,
                 },
             )()
 

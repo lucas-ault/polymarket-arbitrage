@@ -29,7 +29,7 @@ from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from utils.bootstrap import bootstrap_components
-from utils.config_loader import load_config, BotConfig
+from utils.config_loader import load_config, BotConfig, validate_config_for_run
 from utils.logging_utils import setup_logging, performance_logger, trade_logger
 from utils.profit_telemetry import ProfitTelemetry
 from utils.redis_cache import RedisCacheConfig, create_cache_store
@@ -67,6 +67,7 @@ class TradingBot:
         self._seen_trade_ids: set[str] = set()
         self._live_fill_bootstrapped: bool = False
         self.auto_take_profit_monitor: Optional[AutoTakeProfitMonitor] = None
+        self._last_health_maker_cancel_at: Optional[datetime] = None
     
     async def start(self) -> None:
         """Initialize and start all components."""
@@ -93,6 +94,7 @@ class TradingBot:
         self.arb_engine = components.arb_engine
         self.data_feed = components.data_feed
         self.profit_telemetry = ProfitTelemetry()
+        self.execution_engine.set_cancel_callback(self.profit_telemetry.record_cancel)
         self.auto_take_profit_monitor = AutoTakeProfitMonitor(
             AutoTakeProfitConfig(
                 enabled=bool(self.config.trading.auto_take_profit_enabled),
@@ -146,8 +148,10 @@ class TradingBot:
         # Mark portfolio to latest mid before evaluating risk so unrealized PnL
         # tracks the live book even in headless mode.
         self._mark_portfolio_to_market(market_id, market_state)
+        self._record_market_snapshot_for_telemetry(market_id, market_state)
         if self.auto_take_profit_monitor:
             self.auto_take_profit_monitor.maybe_submit_for_market(market_id, market_state)
+        self._refresh_exchange_health_gate()
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():
@@ -156,18 +160,109 @@ class TradingBot:
         
         # Analyze for opportunities
         signals = self.arb_engine.analyze(market_state)
+        freshness_bucket = self._freshness_bucket()
         
         for signal in signals:
+            for order_spec in list(getattr(signal, "orders", []) or []):
+                if isinstance(order_spec, dict):
+                    order_spec.setdefault("freshness_bucket", freshness_bucket)
             self._signal_count += 1
             if self.profit_telemetry and signal.opportunity:
+                strategy_tag = self._signal_strategy_tag(signal)
                 self.profit_telemetry.record_opportunity(
                     market_id=signal.market_id,
-                    strategy=signal.opportunity.opportunity_type.value,
+                    strategy=strategy_tag,
                     edge=signal.opportunity.edge,
-                    fee_bps=self.config.trading.taker_fee_bps,
+                    fee_bps=self._strategy_fee_bps(strategy_tag),
+                    quote_freshness=freshness_bucket,
                 )
             if not self.execution_engine.submit_signal_nowait(signal):
                 logger.warning("Execution queue is full, dropping signal %s", signal.signal_id)
+
+    @staticmethod
+    def _signal_strategy_tag(signal) -> str:
+        for spec in list(getattr(signal, "orders", []) or []):
+            if isinstance(spec, dict):
+                tag = str(spec.get("strategy_tag", "") or "").strip()
+                if tag:
+                    return tag
+        if signal.opportunity is not None:
+            return str(signal.opportunity.opportunity_type.value)
+        return "unknown"
+
+    def _strategy_fee_bps(self, strategy_tag: str) -> float:
+        tag = str(strategy_tag or "").strip().lower()
+        if tag == "market_making":
+            return float(self.config.trading.maker_fee_bps)
+        return float(self.config.trading.taker_fee_bps)
+
+    def _freshness_bucket(self) -> str:
+        if not self.client:
+            return "unknown"
+        stats = self.client.get_runtime_stats()
+        if bool(int(stats.get("markets_rest_fallback_active", 0) or 0)):
+            return "fallback"
+        if self.risk_manager and self.risk_manager.exchange_health_degraded():
+            return "degraded"
+        return "fresh"
+
+    def _record_market_snapshot_for_telemetry(self, market_id: str, market_state) -> None:
+        if not self.profit_telemetry:
+            return
+        order_book = market_state.order_book
+        market = market_state.market
+        yes_price = self._pick_mark_price(
+            order_book.best_bid_yes,
+            order_book.best_ask_yes,
+            market.yes_price,
+        )
+        no_price = self._pick_mark_price(
+            order_book.best_bid_no,
+            order_book.best_ask_no,
+            market.no_price,
+        )
+        if yes_price is None and no_price is not None:
+            yes_price = max(0.0, min(1.0, 1.0 - no_price))
+        if no_price is None and yes_price is not None:
+            no_price = max(0.0, min(1.0, 1.0 - yes_price))
+        self.profit_telemetry.record_market_snapshot(
+            market_id=market_id,
+            yes_price=yes_price,
+            no_price=no_price,
+        )
+
+    def _refresh_exchange_health_gate(self) -> None:
+        if not self.client or not self.risk_manager:
+            return
+        try:
+            self.risk_manager.update_exchange_health(self.client.get_runtime_stats())
+        except Exception as exc:
+            logger.debug("Failed to refresh exchange health stats: %s", exc)
+            return
+        if self.risk_manager.exchange_health_degraded():
+            self._maybe_cancel_maker_quotes_on_degradation()
+
+    def _maybe_cancel_maker_quotes_on_degradation(self) -> None:
+        if not self.execution_engine:
+            return
+        now = datetime.utcnow()
+        if self._last_health_maker_cancel_at is not None:
+            if (now - self._last_health_maker_cancel_at).total_seconds() < 15.0:
+                return
+        self._last_health_maker_cancel_at = now
+
+        async def _cancel_mm() -> None:
+            try:
+                cancelled = await self.execution_engine.cancel_orders_by_strategy("market_making")
+                if cancelled:
+                    logger.warning(
+                        "Exchange health degraded; cancelled %d market-making order(s)",
+                        cancelled,
+                    )
+            except Exception as exc:
+                logger.warning("Failed to cancel maker quotes during degradation: %s", exc)
+
+        asyncio.create_task(_cancel_mm(), name="cancel_mm_on_health_degradation")
     
     @staticmethod
     def _pick_mark_price(best_bid, best_ask, fallback) -> Optional[float]:
@@ -239,13 +334,20 @@ class TradingBot:
         if trade.trade_id in self._seen_trade_ids:
             return
         self._seen_trade_ids.add(trade.trade_id)
-        self.execution_engine.handle_fill(trade)
+        fill_ctx = self.execution_engine.handle_fill(trade)
         if self.profit_telemetry:
             self.profit_telemetry.record_fill(
                 market_id=trade.market_id,
                 price=float(trade.price),
                 size=float(trade.size),
                 fee=float(trade.fee),
+                strategy=str(fill_ctx.get("strategy_tag") or "unknown"),
+                expected_edge=fill_ctx.get("expected_edge"),
+                realized_edge=fill_ctx.get("realized_edge"),
+                quote_freshness=str(fill_ctx.get("freshness_bucket") or "unknown"),
+                token_type=trade.token_type,
+                side=trade.side,
+                timestamp=getattr(trade, "timestamp", None),
             )
 
     async def _consume_live_private_updates(self) -> None:
@@ -258,6 +360,7 @@ class TradingBot:
                 async for event in self.client.stream_private_updates():
                     if not self._running:
                         break
+                    self._refresh_exchange_health_gate()
                     if str(event.get("type") or "") == "order_update":
                         trade = event.get("trade")
                         if trade is not None:
@@ -266,6 +369,7 @@ class TradingBot:
                 break
             except Exception as exc:
                 logger.warning("Private websocket consumer error: %s", exc)
+                self._refresh_exchange_health_gate()
                 await asyncio.sleep(1.0)
     
     async def _sync_live_portfolio_metrics(self) -> None:
@@ -315,6 +419,7 @@ class TradingBot:
                 exposure = self.portfolio.get_total_exposure()
                 positions = len(self.portfolio.get_all_positions())
                 open_orders = self.execution_engine.open_order_count
+                self._refresh_exchange_health_gate()
                 
                 performance_logger.log_snapshot(pnl, exposure, positions, open_orders)
                 
@@ -360,13 +465,20 @@ class TradingBot:
                     if random.random() < self.config.mode.fill_probability:
                         trade = self.client.simulate_fill(order.order_id)
                         if trade:
-                            self.execution_engine.handle_fill(trade)
+                            fill_ctx = self.execution_engine.handle_fill(trade)
                             if self.profit_telemetry:
                                 self.profit_telemetry.record_fill(
                                     market_id=trade.market_id,
                                     price=float(trade.price),
                                     size=float(trade.size),
                                     fee=float(trade.fee),
+                                    strategy=str(fill_ctx.get("strategy_tag") or "unknown"),
+                                    expected_edge=fill_ctx.get("expected_edge"),
+                                    realized_edge=fill_ctx.get("realized_edge"),
+                                    quote_freshness=str(fill_ctx.get("freshness_bucket") or "unknown"),
+                                    token_type=trade.token_type,
+                                    side=trade.side,
+                                    timestamp=getattr(trade, "timestamp", None),
                                 )
                             
             except asyncio.CancelledError:
@@ -528,6 +640,11 @@ async def main_async(args: argparse.Namespace) -> None:
         config.mode.trading_mode = "live"
     elif args.dry_run:
         config.mode.trading_mode = "dry_run"
+    try:
+        config = validate_config_for_run(config)
+    except Exception as e:
+        logger.error(f"Invalid runtime config after CLI overrides: {e}")
+        sys.exit(1)
 
     # Configure logging from config (with CLI verbose override for console output)
     console_level = "DEBUG" if args.verbose else config.logging.console_level

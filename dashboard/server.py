@@ -265,11 +265,17 @@ def create_app() -> FastAPI:
             "kill_switch_triggered": bool(risk.get("kill_switch_triggered")),
             "auto_unwind_on_breach": bool(risk.get("auto_unwind_on_breach")),
             "stale_market_rejections": int(risk.get("stale_market_rejections", 0) or 0),
+            "exchange_health_rejections": int(risk.get("exchange_health_rejections", 0) or 0),
+            "exchange_health_degraded": bool(risk.get("exchange_health_degraded")),
             "volume_rejections": int(risk.get("volume_rejections", 0) or 0),
             "max_market_staleness_seconds": risk.get("max_market_staleness_seconds"),
             "is_streaming": bool(operational.get("is_streaming")),
             "stream_errors": int(operational.get("stream_errors", 0) or 0),
             "stream_reconnects": int(operational.get("stream_reconnects", 0) or 0),
+            "markets_rest_fallback_active": bool(
+                operational.get("markets_rest_fallback_active")
+            ),
+            "private_ws_connected": bool(operational.get("private_ws_connected")),
             "avg_staleness_seconds": operational.get("avg_staleness_seconds"),
             "p95_staleness_seconds": operational.get("p95_staleness_seconds"),
             "max_staleness_seconds": operational.get("max_staleness_seconds"),

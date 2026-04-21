@@ -92,6 +92,19 @@ class BasePolymarketClient(ABC):
         pass
 
     @abstractmethod
+    async def preview_order(
+        self,
+        market_id: str,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+        order_type: str = "ORDER_TYPE_LIMIT",
+        time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+    ) -> dict[str, Any]:
+        pass
+
+    @abstractmethod
     async def close_position(
         self,
         market_id: str,
@@ -180,6 +193,14 @@ class PolymarketClient(BasePolymarketClient):
             "orderbook_updates_emitted": 0.0,
             "orderbook_rotations": 0.0,
             "ws_reconnects": 0.0,
+            "markets_ws_last_message_ts": 0.0,
+            "markets_ws_active": 0.0,
+            "markets_rest_fallback_active": 0.0,
+            "markets_rest_fallback_since_ts": 0.0,
+            "private_ws_last_message_ts": 0.0,
+            "private_ws_connected": 0.0,
+            "api_backpressure_events": 0.0,
+            "api_last_backpressure_ts": 0.0,
             "cache_markets_hit": 0.0,
             "cache_markets_miss": 0.0,
             "cache_markets_writes": 0.0,
@@ -249,7 +270,14 @@ class PolymarketClient(BasePolymarketClient):
                 if not response.content:
                     return {}
                 return response.json()
-            except (httpx.HTTPStatusError, httpx.RequestError):
+            except httpx.HTTPStatusError as exc:
+                status = int(getattr(exc.response, "status_code", 0) or 0)
+                if status == 429 or status >= 500:
+                    self._record_backpressure()
+                if attempt == self.max_retries - 1:
+                    raise
+                await asyncio.sleep(self.retry_delay * (attempt + 1))
+            except httpx.RequestError:
                 if attempt == self.max_retries - 1:
                     raise
                 await asyncio.sleep(self.retry_delay * (attempt + 1))
@@ -297,6 +325,43 @@ class PolymarketClient(BasePolymarketClient):
         if isinstance(value, (int, float)):
             return bool(value)
         return default
+
+    @staticmethod
+    def _now_ts() -> float:
+        return float(time.time())
+
+    def _set_markets_transport_mode(self, mode: str) -> None:
+        normalized = str(mode or "").strip().lower()
+        if normalized == "ws":
+            self._runtime_stats["markets_ws_active"] = 1.0
+            self._runtime_stats["markets_rest_fallback_active"] = 0.0
+            self._runtime_stats["markets_rest_fallback_since_ts"] = 0.0
+            return
+        if normalized == "rest":
+            was_rest = bool(int(self._runtime_stats.get("markets_rest_fallback_active", 0.0)))
+            self._runtime_stats["markets_ws_active"] = 0.0
+            self._runtime_stats["markets_rest_fallback_active"] = 1.0
+            if not was_rest:
+                self._runtime_stats["markets_rest_fallback_since_ts"] = self._now_ts()
+            return
+        # unknown / disconnected
+        self._runtime_stats["markets_ws_active"] = 0.0
+        self._runtime_stats["markets_rest_fallback_active"] = 0.0
+
+    def _record_markets_ws_message(self) -> None:
+        self._runtime_stats["markets_ws_last_message_ts"] = self._now_ts()
+
+    def _record_private_ws_message(self) -> None:
+        self._runtime_stats["private_ws_last_message_ts"] = self._now_ts()
+
+    def _set_private_ws_connected(self, connected: bool) -> None:
+        self._runtime_stats["private_ws_connected"] = 1.0 if connected else 0.0
+
+    def _record_backpressure(self) -> None:
+        self._runtime_stats["api_backpressure_events"] = (
+            self._runtime_stats.get("api_backpressure_events", 0.0) + 1.0
+        )
+        self._runtime_stats["api_last_backpressure_ts"] = self._now_ts()
 
     @staticmethod
     def _parse_outcome_prices(raw: Any) -> tuple[float, float]:
@@ -349,6 +414,14 @@ class PolymarketClient(BasePolymarketClient):
             question=question,
             market_slug=slug,
             description=str(data.get("description") or ""),
+            event_id=str(
+                data.get("eventId")
+                or data.get("event_id")
+                or data.get("eventSlug")
+                or data.get("event_slug")
+                or data.get("event")
+                or ""
+            ),
             yes_token_id=str(data.get("yes_token_id") or ""),
             no_token_id=str(data.get("no_token_id") or ""),
             active=self._to_bool(data.get("active"), default=True),
@@ -779,6 +852,7 @@ class PolymarketClient(BasePolymarketClient):
         markets_per_request_batch = max(1, markets_per_request_batch)
         rotation_delay = max(0.2, rotation_delay)
         batch_delay = max(0.0, batch_delay)
+        self._set_markets_transport_mode("rest")
 
         targets = market_ids.copy()
         if not targets:
@@ -1049,6 +1123,7 @@ class PolymarketClient(BasePolymarketClient):
                     ping_timeout=10,
                 ) as ws:
                     reconnect_attempt = 0
+                    self._set_markets_transport_mode("ws")
                     for message in self._build_market_ws_subscriptions(market_slugs):
                         await ws.send(json.dumps(message))
                     while True:
@@ -1056,6 +1131,7 @@ class PolymarketClient(BasePolymarketClient):
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8", errors="ignore")
                         payload = json.loads(raw)
+                        self._record_markets_ws_message()
                         if payload.get("heartbeat") is not None:
                             continue
                         data = payload.get("marketData") or payload.get("marketDataLite")
@@ -1170,10 +1246,12 @@ class PolymarketClient(BasePolymarketClient):
                     ping_interval=20,
                     ping_timeout=10,
                 ) as ws:
+                    self._set_private_ws_connected(True)
                     for message in self._build_private_ws_subscriptions():
                         await ws.send(json.dumps(message))
                     while True:
                         raw = await ws.recv()
+                        self._record_private_ws_message()
                         if isinstance(raw, bytes):
                             raw = raw.decode("utf-8", errors="ignore")
                         payload = json.loads(raw)
@@ -1181,10 +1259,13 @@ class PolymarketClient(BasePolymarketClient):
                         if event is not None:
                             yield event
             except asyncio.CancelledError:
+                self._set_private_ws_connected(False)
                 raise
             except ConnectionClosed:
+                self._set_private_ws_connected(False)
                 await asyncio.sleep(1.0)
             except Exception as exc:
+                self._set_private_ws_connected(False)
                 logger.warning("Private websocket stream failure: %s", exc)
                 await asyncio.sleep(1.0)
 
@@ -1201,6 +1282,7 @@ class PolymarketClient(BasePolymarketClient):
     ) -> AsyncIterator[tuple[str, OrderBook]]:
         del request_concurrency, request_delay  # Not used in US adapter (kept for compatibility).
         if use_simulation:
+            self._set_markets_transport_mode("unknown")
             async for item in self._stream_simulated_orderbooks(market_ids):
                 yield item
             return
@@ -1209,6 +1291,7 @@ class PolymarketClient(BasePolymarketClient):
         resolved_slugs, slug_to_market_id = await self._resolve_market_targets(targets)
         if not resolved_slugs:
             logger.warning("No valid market targets resolved for orderbook stream")
+            self._set_markets_transport_mode("unknown")
             return
 
         if self.use_websocket and self.key_id and self.secret_key:
@@ -1233,6 +1316,10 @@ class PolymarketClient(BasePolymarketClient):
                 ws_failed,
                 ws_emitted,
             )
+
+        if not self.use_rest_fallback:
+            self._set_markets_transport_mode("unknown")
+            raise RuntimeError("Markets websocket unavailable and api.use_rest_fallback is disabled")
 
         async for item in self._stream_orderbooks_polling(
             resolved_slugs,
@@ -1312,6 +1399,45 @@ class PolymarketClient(BasePolymarketClient):
         }
         return aliases.get(key, "TIME_IN_FORCE_GOOD_TILL_CANCEL")
 
+    def _build_order_payload(
+        self,
+        *,
+        market: Market,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+        order_type: str,
+        time_in_force: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        intent = self._intent_from_order(token_type, side)
+        normalized_order_type = self._normalize_order_type(order_type)
+        normalized_tif = self._normalize_time_in_force(time_in_force)
+        # API price.value always references YES-side price, even for SHORT intents.
+        api_price = float(price)
+        if token_type == TokenType.NO:
+            api_price = 1.0 - api_price
+        api_price = max(0.01, min(0.99, api_price))
+        # Polymarket US orders are denominated in whole contracts.
+        rounded_quantity = int(max(1, round(float(size))))
+        payload = {
+            "marketSlug": market.market_slug or market.market_id,
+            "intent": intent,
+            "type": normalized_order_type,
+            "quantity": rounded_quantity,
+            "tif": normalized_tif,
+            "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
+        }
+        if normalized_order_type == "ORDER_TYPE_LIMIT":
+            payload["price"] = {"value": f"{api_price:.4f}", "currency": "USD"}
+        return payload, {
+            "api_price": api_price,
+            "rounded_quantity": rounded_quantity,
+            "intent": intent,
+            "order_type": normalized_order_type,
+            "time_in_force": normalized_tif,
+        }
+
     async def get_positions(self) -> dict[str, dict[TokenType, Position]]:
         if self.dry_run:
             return self._simulated_positions.copy()
@@ -1371,6 +1497,15 @@ class PolymarketClient(BasePolymarketClient):
     ) -> Order:
         order_id = f"order_{uuid.uuid4().hex[:12]}"
         market = await self.get_market(market_id)
+        payload, payload_meta = self._build_order_payload(
+            market=market,
+            token_type=token_type,
+            side=side,
+            price=price,
+            size=size,
+            order_type=order_type,
+            time_in_force=time_in_force,
+        )
         order = Order(
             order_id=order_id,
             market_id=market.market_id,
@@ -1381,24 +1516,18 @@ class PolymarketClient(BasePolymarketClient):
             size=size,
             status=OrderStatus.OPEN,
             strategy_tag=strategy_tag,
-            order_type=self._normalize_order_type(order_type),
-            time_in_force=self._normalize_time_in_force(time_in_force),
+            order_type=str(payload_meta["order_type"]),
+            time_in_force=str(payload_meta["time_in_force"]),
         )
         if self.dry_run:
             self._simulated_orders[order_id] = order
             return order
 
-        intent = self._intent_from_order(token_type, side)
-        # API price.value always references YES-side price, even for SHORT intents.
-        api_price = price
-        if token_type == TokenType.NO:
-            api_price = 1.0 - price
-        api_price = max(0.01, min(0.99, api_price))
         # Polymarket US orders are denominated in whole contracts. The strategy
         # layer sometimes emits fractional sizes; round to nearest integer and
         # warn loudly when we drop more than 5% of the requested size so
         # operators are not silently trading less than they expected.
-        rounded_quantity = int(max(1, round(size)))
+        rounded_quantity = int(payload_meta["rounded_quantity"])
         size_loss = abs(rounded_quantity - float(size))
         if float(size) > 0 and size_loss / float(size) > 0.05:
             logger.warning(
@@ -1408,18 +1537,6 @@ class PolymarketClient(BasePolymarketClient):
                 market.market_slug or market.market_id,
                 size_loss,
             )
-        normalized_order_type = order.order_type
-        normalized_tif = order.time_in_force
-        payload = {
-            "marketSlug": market.market_slug or market.market_id,
-            "intent": intent,
-            "type": normalized_order_type,
-            "quantity": rounded_quantity,
-            "tif": normalized_tif,
-            "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
-        }
-        if normalized_order_type == "ORDER_TYPE_LIMIT":
-            payload["price"] = {"value": f"{api_price:.4f}", "currency": "USD"}
         try:
             if self._sdk_client:
                 response = await self._sdk_client.orders.create(payload)
@@ -1441,14 +1558,61 @@ class PolymarketClient(BasePolymarketClient):
                 exc,
                 market.market_id,
                 market.market_slug or market.market_id,
-                intent,
-                normalized_order_type,
-                normalized_tif,
-                api_price,
+                payload_meta["intent"],
+                payload_meta["order_type"],
+                payload_meta["time_in_force"],
+                float(payload_meta["api_price"]),
                 rounded_quantity,
             )
             order.status = OrderStatus.REJECTED
             raise
+
+    async def preview_order(
+        self,
+        market_id: str,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+        order_type: str = "ORDER_TYPE_LIMIT",
+        time_in_force: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+    ) -> dict[str, Any]:
+        market = await self.get_market(market_id)
+        payload, _meta = self._build_order_payload(
+            market=market,
+            token_type=token_type,
+            side=side,
+            price=price,
+            size=size,
+            order_type=order_type,
+            time_in_force=time_in_force,
+        )
+        if self.dry_run:
+            return {"status": "simulated", "request": payload}
+
+        if self._sdk_client:
+            preview_fn = getattr(self._sdk_client.orders, "preview", None)
+            if preview_fn is not None:
+                response = await preview_fn(payload)
+                return response if isinstance(response, dict) else {"response": response}
+
+        try:
+            response = await self._request(
+                "POST",
+                "/v1/order/preview",
+                json_data=payload,
+                use_private=True,
+            )
+            return response if isinstance(response, dict) else {"response": response}
+        except Exception:
+            # Some API variants expect the create payload nested under "request".
+            response = await self._request(
+                "POST",
+                "/v1/order/preview",
+                json_data={"request": payload},
+                use_private=True,
+            )
+            return response if isinstance(response, dict) else {"response": response}
 
     async def cancel_order(self, order_id: str, market_slug: Optional[str] = None) -> None:
         if self.dry_run:

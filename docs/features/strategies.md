@@ -14,7 +14,8 @@ This feature detects trading opportunities from each `MarketState` and turns the
 
 For each update it can produce:
 
-- one bundle arbitrage signal
+- one binary bundle arbitrage signal (legacy)
+- one event-bundle arbitrage signal (long-only, multi-market)
 - zero, one, or two market-making signals
 
 depending on configuration and the current order book.
@@ -28,6 +29,11 @@ YES + NO ~= 1.0
 ```
 
 The engine looks for mispricings around that relationship.
+
+### Polymarket US caveat
+On polymarket.us, binary NO liquidity is often synthesized from YES (`1 - YES`)
+rather than a truly independent book. `ArbEngine` warns loudly when binary
+bundle scanning is enabled, and the safe default is `bundle_arb_enabled: false`.
 
 ### Bundle long
 Condition:
@@ -61,7 +67,25 @@ The engine supports:
 
 and computes net edge after estimated fees.
 
-Important runtime note: the config dataclass supports these values, but the current entrypoints do not forward the values from `config.yaml` into `ArbEngine`.
+Runtime note: these values are forwarded through shared bootstrap wiring.
+
+## Event-Bundle Arbitrage (Polymarket US-aligned)
+### Idea
+For a multi-outcome event, the long-only basket is:
+
+```text
+sum(best_ask_yes across outcomes) < 1.0 - fees - min_edge
+```
+
+### Action
+
+- buy YES in each outcome market of the event
+- emit one multi-leg signal with `strategy_tag="event_bundle_arb"`
+
+### Current scope
+
+- implemented as long-only (`EVENT_BUNDLE_LONG`)
+- short-basket event bundle is intentionally deferred
 
 ## Market Making
 ### Idea
@@ -114,8 +138,10 @@ Defined in `polymarket_client/models.py`:
 
 - `BUNDLE_LONG`
 - `BUNDLE_SHORT`
+- `EVENT_BUNDLE_LONG`
 - `MM_BID`
 - `MM_ASK`
+- `TAKER_ENTRY`
 
 ## Test Coverage
 `tests/test_arb_engine.py` covers:
@@ -133,6 +159,7 @@ Defined in `polymarket_client/models.py`:
 - Only single-platform Polymarket strategies are wired into the live bot callback.
 - The market-making opportunity type labeling uses `MM_BID` for YES and `MM_ASK` for NO, even though each MM signal actually places both sides.
 - Strategy sizing is liquidity-aware at the best level, but it does not model deeper book impact.
+- Event-bundle currently supports long-only YES baskets; short baskets are deferred.
 
 ## Related Docs
 - `trading-bot.md`

@@ -35,6 +35,8 @@ def test_health_endpoint_reports_risk_and_stream_state():
         "kill_switch_triggered": True,
         "auto_unwind_on_breach": True,
         "stale_market_rejections": 3,
+        "exchange_health_rejections": 2,
+        "exchange_health_degraded": True,
         "volume_rejections": 1,
         "max_market_staleness_seconds": 5.0,
     }
@@ -42,6 +44,8 @@ def test_health_endpoint_reports_risk_and_stream_state():
         "is_streaming": True,
         "stream_errors": 2,
         "stream_reconnects": 4,
+        "markets_rest_fallback_active": True,
+        "private_ws_connected": False,
         "avg_staleness_seconds": 0.4,
         "p95_staleness_seconds": 1.2,
         "max_staleness_seconds": 2.5,
@@ -56,11 +60,15 @@ def test_health_endpoint_reports_risk_and_stream_state():
     assert body["kill_switch_triggered"] is True
     assert body["auto_unwind_on_breach"] is True
     assert body["stale_market_rejections"] == 3
+    assert body["exchange_health_rejections"] == 2
+    assert body["exchange_health_degraded"] is True
     assert body["volume_rejections"] == 1
     assert body["max_market_staleness_seconds"] == 5.0
     assert body["is_streaming"] is True
     assert body["stream_errors"] == 2
     assert body["stream_reconnects"] == 4
+    assert body["markets_rest_fallback_active"] is True
+    assert body["private_ws_connected"] is False
 
 
 def test_profit_endpoint_returns_telemetry_summary():

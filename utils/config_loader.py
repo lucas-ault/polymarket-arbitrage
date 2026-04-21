@@ -41,7 +41,7 @@ class TradingConfig:
     """Trading configuration."""
     markets: list[str] = field(default_factory=list)
     min_edge: float = 0.01
-    bundle_arb_enabled: bool = True
+    bundle_arb_enabled: bool = False
     # N-way event-bundle arbitrage: scan each multi-outcome event and trigger
     # when sum(YES asks) across all outcomes < 1 - edge - fees, or sum(YES
     # bids) > 1 + edge + fees. This is the only form of bundle arb that can
@@ -50,7 +50,7 @@ class TradingConfig:
     event_bundle_arb_enabled: bool = False
     min_spread: float = 0.05
     tick_size: float = 0.01
-    mm_enabled: bool = True
+    mm_enabled: bool = False
     # Skip market-making in markets whose visible spread exceeds this. Wide
     # spreads on prediction markets almost always mean there is no real
     # liquidity (single resting quotes) and quoting into them just spams the
@@ -85,6 +85,12 @@ class TradingConfig:
     max_order_size: float = 200.0
     slippage_tolerance: float = 0.02
     order_timeout_seconds: float = 60.0
+    preview_live_orders: bool = True
+    preview_taker_orders: bool = True
+    preview_bundle_orders: bool = True
+    preview_urgent_exit_orders: bool = True
+    preview_other_orders: bool = False
+    preview_maker_min_notional: float = 25.0
     # MM quotes should die much faster than directional / arb orders because
     # the inside spread often disappears within a second.
     mm_order_timeout_seconds: float = 12.0
@@ -127,6 +133,13 @@ class RiskConfig:
     auto_unwind_on_breach: bool = False
     allow_urgent_exit_after_kill_switch: bool = True
     allow_urgent_exit_on_stale_data: bool = True
+    exchange_health_gate_enabled: bool = True
+    exchange_health_grace_seconds: float = 20.0
+    max_private_ws_silence_seconds: float = 45.0
+    max_markets_ws_silence_seconds: float = 60.0
+    max_markets_rest_fallback_seconds: float = 45.0
+    max_backpressure_events: int = 3
+    allow_reduce_only_on_exchange_degradation: bool = True
 
 
 @dataclass
@@ -134,8 +147,8 @@ class ModeConfig:
     """Trading mode configuration."""
     trading_mode: str = "dry_run"  # "live" or "dry_run"
     data_mode: str = "real"  # "real" or "simulation" - use simulation for demos
-    cross_platform_enabled: bool = True  # Enable cross-platform arbitrage (Polymarket + Kalshi)
-    kalshi_enabled: bool = True  # Enable Kalshi market monitoring
+    cross_platform_enabled: bool = False  # Enable cross-platform arbitrage (Polymarket + Kalshi)
+    kalshi_enabled: bool = False  # Enable Kalshi market monitoring
     min_match_similarity: float = 0.6  # Minimum similarity score for market matching (0-1)
     cross_platform_match_start_delay_seconds: float = 0.0
     cross_platform_refresh_interval_seconds: float = 300.0
@@ -294,13 +307,15 @@ def load_config(config_path: str = "config.yaml") -> BotConfig:
         cache=_build_dataclass(CacheConfig, cache_data),
     )
 
+    return validate_config_for_run(config)
+
+
+def validate_config_for_run(config: BotConfig) -> BotConfig:
+    """Normalize and validate a config right before runtime starts."""
     # Keep mode semantics strict: live trading should never simulate fills.
     if config.is_live and config.mode.simulate_fills:
         config.mode.simulate_fills = False
-    
-    # Validate
     _validate_config(config)
-    
     return config
 
 
@@ -401,6 +416,8 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("trading.auto_take_profit_profit_threshold_usd must be non-negative")
     if config.trading.auto_take_profit_cooldown_seconds < 0:
         errors.append("trading.auto_take_profit_cooldown_seconds must be non-negative")
+    if config.trading.preview_maker_min_notional < 0:
+        errors.append("trading.preview_maker_min_notional must be non-negative")
     
     # Risk validation
     if config.risk.max_position_per_market <= 0:
@@ -418,6 +435,16 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("risk.min_peak_pnl_for_drawdown must be non-negative")
     if config.risk.max_market_staleness_seconds < 0:
         errors.append("risk.max_market_staleness_seconds must be non-negative")
+    if config.risk.exchange_health_grace_seconds < 0:
+        errors.append("risk.exchange_health_grace_seconds must be non-negative")
+    if config.risk.max_private_ws_silence_seconds < 0:
+        errors.append("risk.max_private_ws_silence_seconds must be non-negative")
+    if config.risk.max_markets_ws_silence_seconds < 0:
+        errors.append("risk.max_markets_ws_silence_seconds must be non-negative")
+    if config.risk.max_markets_rest_fallback_seconds < 0:
+        errors.append("risk.max_markets_rest_fallback_seconds must be non-negative")
+    if config.risk.max_backpressure_events < 0:
+        errors.append("risk.max_backpressure_events must be non-negative")
     
     # Mode <-> data sanity (live mode against synthetic books would be unsafe).
     if config.is_live and config.use_simulation:

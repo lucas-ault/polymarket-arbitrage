@@ -28,12 +28,14 @@ trading:
   
   # Arbitrage settings
   min_edge: 0.01           # 1% edge required for bundle arbitrage
-  bundle_arb_enabled: true
+  bundle_arb_enabled: false
+  event_bundle_arb_enabled: false
   
   # Market-making settings
   min_spread: 0.05         # 5c spread to act as market maker
   tick_size: 0.01          # Minimum price increment
-  mm_enabled: false        # Disabled for real data (markets too efficient)
+  mm_enabled: false        # Disabled by default for safer paper/live startup
+  taker_enabled: false
   
   # Order sizing - SMALL for $50 budget
   default_order_size: 5    # $5 per order
@@ -71,6 +73,13 @@ risk:
   # Kill switch
   kill_switch_enabled: true
   auto_unwind_on_breach: false
+  exchange_health_gate_enabled: true
+  exchange_health_grace_seconds: 20
+  max_private_ws_silence_seconds: 45
+  max_markets_ws_silence_seconds: 60
+  max_markets_rest_fallback_seconds: 45
+  max_backpressure_events: 3
+  allow_reduce_only_on_exchange_degradation: true
 
 mode:
   # Trading mode: "live" or "dry_run"
@@ -82,8 +91,8 @@ mode:
   data_mode: "real"  # <-- CHANGE TO "simulation" FOR DEMOS
   
   # Cross-platform arbitrage (Polymarket + Kalshi)
-  cross_platform_enabled: true    # Enable cross-platform arbitrage detection
-  kalshi_enabled: true            # Enable Kalshi market monitoring
+  cross_platform_enabled: false   # Disabled by default; execution loop is Polymarket-only
+  kalshi_enabled: false           # Disabled by default; enable only for matching/monitoring
   min_match_similarity: 0.6       # Minimum similarity score for market matching (0-1)
   cross_platform_match_start_delay_seconds: 5.0  # Delay matching startup to let feed warm up
   cross_platform_match_process_workers: 3  # 4-core profile: keep one core for I/O/event loop

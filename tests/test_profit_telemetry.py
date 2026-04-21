@@ -1,5 +1,7 @@
 """Tests for the post-fee ProfitTelemetry aggregator."""
 
+from datetime import datetime, timedelta
+
 from utils.profit_telemetry import ProfitTelemetry
 
 
@@ -67,3 +69,53 @@ def test_invalid_inputs_are_ignored():
     summary = pt.summary()
     assert summary["total_opportunities"] == 0
     assert summary["total_fills"] == 0
+
+
+def test_per_strategy_fill_and_cancel_metrics():
+    pt = ProfitTelemetry()
+    pt.record_opportunity("m1", "taker_entry", edge=0.02)
+    pt.record_fill(
+        "m1",
+        price=0.5,
+        size=4,
+        fee=0.02,
+        strategy="taker_entry",
+        expected_edge=0.02,
+        realized_edge=0.015,
+        quote_freshness="fresh",
+    )
+    pt.record_cancel("taker_entry")
+
+    row = pt.summary()["per_strategy"]["taker_entry"]
+    assert row["fills"] == 1.0
+    assert row["cancels"] == 1.0
+    assert row["cancel_to_fill_ratio"] == 1.0
+    assert row["avg_expected_edge_at_fill"] == 0.02
+    assert row["avg_realized_edge"] == 0.015
+
+
+def test_markout_aggregation_by_horizon():
+    pt = ProfitTelemetry()
+    fill_ts = datetime.utcnow() - timedelta(seconds=40)
+    pt.record_fill(
+        "m1",
+        price=0.5,
+        size=1,
+        fee=0.0,
+        strategy="bundle_arb",
+        token_type="yes",
+        side="buy",
+        timestamp=fill_ts,
+    )
+    pt.record_market_snapshot(
+        market_id="m1",
+        yes_price=0.55,
+        no_price=0.45,
+        timestamp=datetime.utcnow(),
+    )
+
+    row = pt.summary()["per_strategy"]["bundle_arb"]
+    assert row["markout_count_1s"] == 1.0
+    assert row["markout_count_5s"] == 1.0
+    assert row["markout_count_30s"] == 1.0
+    assert abs(row["markout_avg_1s"] - 0.05) < 1e-9

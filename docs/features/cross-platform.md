@@ -111,6 +111,8 @@ Relevant config keys include:
 - `api.kalshi_api_url`
 
 `mode.min_match_similarity` is forwarded into matcher initialization and also stored in cache metadata to avoid reusing mismatched-threshold snapshots.
+The safe default profile keeps `mode.cross_platform_enabled=false` and
+`mode.kalshi_enabled=false` until cross-platform execution is implemented.
 
 ## Unified Order Book Conversion
 Kalshi only returns bid ladders. `KalshiOrderBook.to_unified_orderbook()` derives asks using the binary-market complement relationship:

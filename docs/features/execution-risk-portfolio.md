@@ -15,6 +15,8 @@ These three subsystems turn strategy signals into orders, enforce trading constr
 `ExecutionEngine` handles:
 
 - queued signal processing
+- strategy-aware placement policy (maker / taker / urgent-exit / bundle)
+- live order preview before send (policy-driven)
 - order placement
 - order cancellation
 - slippage checks
@@ -25,11 +27,19 @@ These three subsystems turn strategy signals into orders, enforce trading constr
 1. `submit_signal(signal)` pushes onto `_signal_queue`
 2. `_process_signals()` dequeues and executes
 3. `_handle_place_orders()` validates each proposed order
-4. `_place_order()` delegates to `PolymarketClient`
+4. `_place_order_for_strategy()` applies preview and routing policy
+5. `_place_order()` delegates to `PolymarketClient`
 5. successful orders are stored in `_open_orders`
 
 ### Slippage checks
 If a signal includes an `Opportunity`, execution compares intended order prices against the captured opportunity snapshot and rejects orders outside `slippage_tolerance`.
+
+### Preview checks
+In live mode, preview policy is strategy-aware:
+
+- taker and bundle paths preview by default
+- urgent-exit fallback orders can preview
+- maker previews are thresholded by configurable notional
 
 ### Timeout handling
 `_monitor_order_timeouts()` periodically cancels orders older than `order_timeout_seconds`.
@@ -89,6 +99,17 @@ and per-market staleness are tracked automatically as long as the feed is
 running. `risk.max_market_staleness_seconds` rejects orders for markets whose
 last update is older than the configured threshold; the rejection counter is
 exposed in `RiskManager.get_summary()`.
+
+### Exchange-health gating
+`RiskManager.update_exchange_health()` ingests runtime transport/backpressure
+stats and can reject new non-reduce-only orders when:
+
+- private WS has gone silent past threshold
+- markets WS has gone silent past threshold
+- REST fallback remains active too long
+- API backpressure events exceed threshold
+
+When degraded, runtimes also cancel market-making quotes proactively.
 
 ## Portfolio
 ### Responsibilities

@@ -77,3 +77,50 @@ async def test_close_position_uses_rest_endpoint_and_slippage_payload():
     assert path == "/v1/order/close-position"
     assert payload["marketSlug"] == market.market_slug
     assert payload["slippageTolerance"]["ticks"] == 4
+
+
+@pytest.mark.asyncio
+async def test_preview_and_place_share_normalized_payload_shape():
+    client = PolymarketClient(dry_run=False, use_websocket=False, use_rest_fallback=False)
+    market = _market()
+    payloads = []
+
+    async def fake_get_market(_market_id: str):
+        return market
+
+    async def fake_request(method: str, path: str, **kwargs):
+        payloads.append((method, path, kwargs.get("json_data")))
+        if path == "/v1/order/preview":
+            return {"order": {"state": "ORDER_STATE_PENDING_NEW"}}
+        return {"id": "ord-1"}
+
+    client.get_market = fake_get_market  # type: ignore[method-assign]
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.preview_order(
+        market_id=market.market_id,
+        token_type=TokenType.NO,
+        side=OrderSide.BUY,
+        price=0.21,
+        size=3.0,
+        order_type="limit",
+        time_in_force="ioc",
+    )
+    await client.place_order(
+        market_id=market.market_id,
+        token_type=TokenType.NO,
+        side=OrderSide.BUY,
+        price=0.21,
+        size=3.0,
+        order_type="limit",
+        time_in_force="ioc",
+    )
+
+    assert len(payloads) == 2
+    _, preview_path, preview_payload = payloads[0]
+    _, place_path, place_payload = payloads[1]
+    assert preview_path == "/v1/order/preview"
+    assert place_path == "/v1/orders"
+    assert preview_payload == place_payload
+    assert place_payload["intent"] == "ORDER_INTENT_BUY_SHORT"
+    assert place_payload["tif"] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"

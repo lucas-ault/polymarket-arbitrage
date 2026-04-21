@@ -92,6 +92,9 @@ Repository surface:
 
 - `PolymarketClient.place_order` constructs this payload, normalizes `NO`-side
   prices to `1 - p`, clamps the price to `[0.01, 0.99]`, and returns an `Order`.
+- `PolymarketClient.preview_order` calls `/v1/order/preview` with the same
+  normalized request shape used by live order placement.
+- `ExecutionEngine` applies strategy-specific preview policy before live sends.
 
 **Inferred safeguards:**
 
@@ -100,6 +103,7 @@ Repository surface:
 - Snapshot the book at signal generation and reject the order if the inside has
   moved beyond the configured slippage tolerance by the time we send it.
 - Tag every order with the strategy that generated it for cancel / unwind logic.
+- Preview live orders before send, at minimum for taker and bundle flows.
 
 ## Cancels and Order Hygiene
 
@@ -140,6 +144,9 @@ Repository surface:
   any sustained mismatch as a critical alert.
 - Use exchange-reported PnL as the authoritative source for risk gating (daily
   loss, drawdown). Local PnL can drift due to fee or rounding differences.
+- Fail closed when exchange health degrades: private WS silence, prolonged
+  market-data REST fallback, or repeated API backpressure should block new
+  non-reduce-only orders.
 
 ## Slippage, Fees, and Edge
 
@@ -187,10 +194,10 @@ These apply to any prediction-market bot, not just Polymarket.
 | --- | --- |
 | Auth + signing | `polymarket_client/api.py::_auth_headers` |
 | Markets WS | `polymarket_client/api.py::_stream_orderbooks_ws` |
-| Order payload | `polymarket_client/api.py::place_order` |
+| Order payload + preview | `polymarket_client/api.py::place_order`, `polymarket_client/api.py::preview_order` |
 | Order cancels | `polymarket_client/api.py::cancel_order`, `core/execution.py::cancel_all_orders` |
 | Position reconciliation | `polymarket_client/api.py::get_positions`, `run_with_dashboard.py::_sync_live_portfolio_metrics` |
-| Stale-data gating | `core/data_feed.py::get_staleness`, `core/risk_manager.py::register_market_state` |
+| Stale-data + exchange-health gating | `core/data_feed.py::get_staleness`, `core/risk_manager.py::register_market_state`, `core/risk_manager.py::update_exchange_health` |
 | Auto-unwind | `core/risk_manager.py::auto_unwind_on_breach`, `core/execution.py::cancel_all_orders` |
 | Dashboard health surface | `dashboard/integration.py::_update_loop`, `dashboard/server.py` |
 | Profit telemetry | `core/arb_engine.py::get_stats`, `core/portfolio.py::get_pnl`, `utils/profit_telemetry.py` |

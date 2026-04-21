@@ -11,7 +11,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from polymarket_client.api import PolymarketClient
 from polymarket_client.models import (
@@ -49,6 +49,13 @@ class ExecutionConfig:
     # seconds. Prevents the bot from hammering closed/non-placeable markets
     # discovered by the public catalog. 0 disables.
     unplaceable_market_skip_seconds: float = 300.0
+    # Live-order preview policy.
+    preview_live_orders: bool = True
+    preview_taker_orders: bool = True
+    preview_bundle_orders: bool = True
+    preview_urgent_exit_orders: bool = True
+    preview_other_orders: bool = False
+    preview_maker_min_notional: float = 25.0
 
 
 @dataclass
@@ -70,6 +77,8 @@ class ExecutionStats:
     taker_orders_rejected: int = 0
     urgent_exit_attempted: int = 0
     urgent_exit_rejected: int = 0
+    orders_previewed: int = 0
+    preview_rejections: int = 0
 
 
 class ExecutionEngine:
@@ -102,6 +111,8 @@ class ExecutionEngine:
         self._orders_by_market: dict[str, list[str]] = {}
         self._orders_by_strategy: dict[str, list[str]] = {}
         self._cancel_in_flight: set[str] = set()
+        self._order_signal_context: dict[str, dict[str, Any]] = {}
+        self._cancel_callback: Optional[Callable[[str], None]] = None
 
         # Markets whose orders the API has permanently rejected. We skip new
         # signals for them until this timestamp passes. Keeps the log readable
@@ -116,6 +127,10 @@ class ExecutionEngine:
         self._running = False
         
         logger.info(f"ExecutionEngine initialized (dry_run={config.dry_run})")
+
+    def set_cancel_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Register callback invoked with strategy tag after successful cancel."""
+        self._cancel_callback = callback
     
     async def start(self) -> None:
         """Start the execution engine."""
@@ -239,35 +254,130 @@ class ExecutionEngine:
             market_id, ttl, reason,
         )
 
+    @staticmethod
+    def _strategy_class(strategy_tag: str) -> str:
+        tag = str(strategy_tag or "").strip().lower()
+        if tag == "market_making":
+            return "maker"
+        if tag == "taker_entry":
+            return "taker"
+        if tag == "urgent_exit":
+            return "urgent_exit"
+        if tag in {"bundle_arb", "event_bundle_arb"}:
+            return "bundle"
+        return "other"
+
+    def _should_preview_order(
+        self,
+        *,
+        strategy_class: str,
+        price: float,
+        size: float,
+    ) -> bool:
+        if self.config.dry_run or not self.config.preview_live_orders:
+            return False
+        if strategy_class == "taker":
+            return bool(self.config.preview_taker_orders)
+        if strategy_class == "bundle":
+            return bool(self.config.preview_bundle_orders)
+        if strategy_class == "urgent_exit":
+            return bool(self.config.preview_urgent_exit_orders)
+        if strategy_class == "maker":
+            notional = abs(float(price) * float(size))
+            return notional >= float(self.config.preview_maker_min_notional)
+        return bool(self.config.preview_other_orders)
+
+    async def _preview_order_or_reject(
+        self,
+        *,
+        market_id: str,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+        strategy_tag: str,
+        order_type: str,
+        time_in_force: str,
+    ) -> bool:
+        try:
+            self.stats.orders_previewed += 1
+            await self.client.preview_order(
+                market_id=market_id,
+                token_type=token_type,
+                side=side,
+                price=price,
+                size=size,
+                order_type=order_type,
+                time_in_force=time_in_force,
+            )
+            return True
+        except Exception as exc:
+            self.stats.preview_rejections += 1
+            self.stats.signals_rejected += 1
+            self._note_strategy_rejection(strategy_tag)
+            logger.warning(
+                "Order preview rejected: market=%s side=%s token=%s strategy=%s reason=%s",
+                market_id,
+                side.value,
+                token_type.value,
+                strategy_tag or "unknown",
+                exc,
+            )
+            trade_logger.log_order_rejected(
+                market_id=market_id,
+                side=side.value,
+                token=token_type.value,
+                price=price,
+                size=size,
+                strategy=strategy_tag,
+                reason="preview_rejected",
+            )
+            return False
+
+    async def _place_order_for_strategy(
+        self,
+        *,
+        strategy_class: str,
+        market_id: str,
+        token_type: TokenType,
+        side: OrderSide,
+        price: float,
+        size: float,
+        strategy_tag: str,
+        order_type: str,
+        time_in_force: str,
+    ) -> Optional[Order]:
+        if self._should_preview_order(strategy_class=strategy_class, price=price, size=size):
+            ok = await self._preview_order_or_reject(
+                market_id=market_id,
+                token_type=token_type,
+                side=side,
+                price=price,
+                size=size,
+                strategy_tag=strategy_tag,
+                order_type=order_type,
+                time_in_force=time_in_force,
+            )
+            if not ok:
+                return None
+        return await self._place_order(
+            market_id=market_id,
+            token_type=token_type,
+            side=side,
+            price=price,
+            size=size,
+            strategy_tag=strategy_tag,
+            order_type=order_type,
+            time_in_force=time_in_force,
+        )
+
     async def _handle_place_orders(self, signal: Signal) -> None:
         """Handle a place_orders signal."""
-        if self._is_market_unplaceable(signal.market_id):
-            # Drop quietly — the warning was already logged when we first
-            # decided to skip this market. Counts as a rejection so dashboards
-            # still see the pressure.
-            self.stats.signals_rejected += len(signal.orders) or 1
-            self.stats.unplaceable_signal_skips += 1
-            until = self._unplaceable_until.get(signal.market_id)
-            now = datetime.utcnow()
-            last_logged = self._last_unplaceable_skip_log.get(signal.market_id)
-            if last_logged is None or (now - last_logged).total_seconds() >= 30.0:
-                remaining = (
-                    max(0.0, (until - now).total_seconds())
-                    if until is not None
-                    else 0.0
-                )
-                logger.info(
-                    "Skipping place_orders for market %s: marked unplaceable for another %.0fs",
-                    signal.market_id,
-                    remaining,
-                )
-                self._last_unplaceable_skip_log[signal.market_id] = now
-            return
-
         for order_spec in signal.orders:
             strategy_tag = ""
             try:
                 # Extract order parameters
+                target_market_id = str(order_spec.get("market_id") or signal.market_id)
                 token_type = order_spec["token_type"]
                 side = order_spec["side"]
                 price = order_spec["price"]
@@ -278,17 +388,39 @@ class ExecutionEngine:
                 time_in_force = str(
                     order_spec.get("time_in_force", "TIME_IN_FORCE_GOOD_TILL_CANCEL")
                 )
+                strategy_class = self._strategy_class(strategy_tag)
                 use_close_position = bool(order_spec.get("close_position", False))
                 slippage_ticks = order_spec.get("slippage_ticks")
+
+                if self._is_market_unplaceable(target_market_id):
+                    self.stats.signals_rejected += 1
+                    self.stats.unplaceable_signal_skips += 1
+                    until = self._unplaceable_until.get(target_market_id)
+                    now = datetime.utcnow()
+                    last_logged = self._last_unplaceable_skip_log.get(target_market_id)
+                    if last_logged is None or (now - last_logged).total_seconds() >= 30.0:
+                        remaining = (
+                            max(0.0, (until - now).total_seconds())
+                            if until is not None
+                            else 0.0
+                        )
+                        logger.info(
+                            "Skipping place_orders for market %s: marked unplaceable for another %.0fs",
+                            target_market_id,
+                            remaining,
+                        )
+                        self._last_unplaceable_skip_log[target_market_id] = now
+                    continue
                 
                 # Check slippage if enabled
-                if self.config.enable_slippage_check and signal.opportunity:
+                skip_slippage_check = strategy_tag == "event_bundle_arb"
+                if self.config.enable_slippage_check and signal.opportunity and not skip_slippage_check:
                     if not self._check_slippage(signal.opportunity, order_spec):
                         self.stats.slippage_rejections += 1
                         self._note_strategy_rejection(strategy_tag)
                         logger.warning(f"Order rejected due to slippage: {order_spec}")
                         trade_logger.log_order_rejected(
-                            market_id=signal.market_id,
+                            market_id=target_market_id,
                             side=side.value,
                             token=token_type.value,
                             price=price,
@@ -301,7 +433,7 @@ class ExecutionEngine:
                 # Check risk limits
                 proposed_order = Order(
                     order_id="temp",
-                    market_id=signal.market_id,
+                    market_id=target_market_id,
                     token_type=token_type,
                     side=side,
                     price=price,
@@ -317,7 +449,7 @@ class ExecutionEngine:
                     self._note_strategy_rejection(strategy_tag)
                     logger.warning(f"Order rejected by risk manager: {order_spec}")
                     trade_logger.log_order_rejected(
-                        market_id=signal.market_id,
+                        market_id=target_market_id,
                         side=side.value,
                         token=token_type.value,
                         price=price,
@@ -329,7 +461,7 @@ class ExecutionEngine:
                 
                 if use_close_position:
                     if await self._close_position(
-                        market_id=signal.market_id,
+                        market_id=target_market_id,
                         strategy_tag=strategy_tag or "urgent_exit",
                         side=side,
                         token_type=token_type,
@@ -344,8 +476,9 @@ class ExecutionEngine:
                         continue
 
                 # Place the order
-                order = await self._place_order(
-                    market_id=signal.market_id,
+                order = await self._place_order_for_strategy(
+                    strategy_class=strategy_class,
+                    market_id=target_market_id,
                     token_type=token_type,
                     side=side,
                     price=price,
@@ -358,6 +491,19 @@ class ExecutionEngine:
                 if order:
                     order.quote_group_id = quote_group_id
                     self._track_order(order)
+                    expected_edge = None
+                    if signal.opportunity is not None:
+                        try:
+                            expected_edge = float(signal.opportunity.edge)
+                        except (TypeError, ValueError):
+                            expected_edge = None
+                    self._order_signal_context[order.order_id] = {
+                        "strategy_tag": strategy_tag,
+                        "signal_price": float(price),
+                        "expected_edge": expected_edge,
+                        "freshness_bucket": str(order_spec.get("freshness_bucket", "unknown")),
+                        "signal_timestamp": datetime.utcnow().timestamp(),
+                    }
                     self._note_strategy_placement(order.strategy_tag)
                     self.stats.orders_placed += 1
                     self.stats.total_notional += order.notional
@@ -574,6 +720,7 @@ class ExecutionEngine:
                 del self._order_timestamps[order_id]
             if order_id in self._order_timeouts_seconds:
                 del self._order_timeouts_seconds[order_id]
+            self._order_signal_context.pop(order_id, None)
             
             # Remove from market tracking
             if order.market_id in self._orders_by_market:
@@ -602,10 +749,16 @@ class ExecutionEngine:
             if tracked_order:
                 market_slug = tracked_order.market_slug or tracked_order.market_id
             await self.client.cancel_order(order_id, market_slug=market_slug)
+            strategy_tag = str(tracked_order.strategy_tag or "")
             self._untrack_order(order_id)
             self.stats.orders_cancelled += 1
             logger.info(f"Order cancelled: {order_id}")
             trade_logger.log_order_cancelled(order_id=order_id, reason="cancel_request")
+            if strategy_tag and self._cancel_callback is not None:
+                try:
+                    self._cancel_callback(strategy_tag)
+                except Exception as exc:
+                    logger.debug("Cancel callback failed for %s: %s", order_id, exc)
             return True
         except Exception as e:
             logger.error(f"Failed to cancel order {order_id}: {e}")
@@ -723,12 +876,34 @@ class ExecutionEngine:
             except Exception as e:
                 logger.error(f"Order timeout monitor error: {e}")
     
-    def handle_fill(self, trade: Trade) -> None:
-        """Handle a trade fill notification."""
+    def handle_fill(self, trade: Trade) -> dict[str, Any]:
+        """Handle a trade fill notification and return telemetry context."""
         order_id = trade.order_id
-        
+        fill_context: dict[str, Any] = {
+            "strategy_tag": "unknown",
+            "expected_edge": None,
+            "realized_edge": None,
+            "freshness_bucket": "unknown",
+        }
+
         if order_id in self._open_orders:
             order = self._open_orders[order_id]
+            signal_ctx = self._order_signal_context.get(order_id, {})
+            strategy_tag = str(order.strategy_tag or signal_ctx.get("strategy_tag") or "unknown")
+            expected_edge = signal_ctx.get("expected_edge")
+            signal_price = signal_ctx.get("signal_price")
+            realized_edge = None
+            try:
+                if expected_edge is not None and signal_price is not None:
+                    realized_edge = float(expected_edge) - abs(float(trade.price) - float(signal_price))
+            except (TypeError, ValueError):
+                realized_edge = None
+            fill_context = {
+                "strategy_tag": strategy_tag,
+                "expected_edge": expected_edge,
+                "realized_edge": realized_edge,
+                "freshness_bucket": str(signal_ctx.get("freshness_bucket", "unknown")),
+            }
             order.filled_size += trade.size
             order.updated_at = datetime.utcnow()
             
@@ -765,6 +940,11 @@ class ExecutionEngine:
             f"Fill: {trade.trade_id} | "
             f"{trade.side.value} {trade.size:.2f} {trade.token_type.value} @ {trade.price:.4f}"
         )
+        return fill_context
+
+    def get_order_context(self, order_id: str) -> dict[str, Any]:
+        """Return current signal context for a tracked order id."""
+        return dict(self._order_signal_context.get(order_id, {}))
     
     def get_open_orders(self, market_id: Optional[str] = None) -> list[Order]:
         """Get all open orders, optionally filtered by market."""

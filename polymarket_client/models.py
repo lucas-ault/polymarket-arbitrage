@@ -38,6 +38,7 @@ class OpportunityType(Enum):
     """Type of trading opportunity detected."""
     BUNDLE_LONG = "bundle_long"    # Buy YES + NO when sum < 1
     BUNDLE_SHORT = "bundle_short"  # Sell YES + NO when sum > 1
+    EVENT_BUNDLE_LONG = "event_bundle_long"  # Buy YES across outcomes when sum < 1
     MM_BID = "mm_bid"              # Market-making bid placement
     MM_ASK = "mm_ask"              # Market-making ask placement
     TAKER_ENTRY = "taker_entry"    # IOC taker entry
@@ -173,6 +174,7 @@ class Market:
     question: str
     market_slug: str = ""
     description: str = ""
+    event_id: str = ""
     
     # Token IDs
     yes_token_id: str = ""
@@ -331,7 +333,11 @@ class Opportunity:
     
     @property
     def is_bundle_arb(self) -> bool:
-        return self.opportunity_type in (OpportunityType.BUNDLE_LONG, OpportunityType.BUNDLE_SHORT)
+        return self.opportunity_type in (
+            OpportunityType.BUNDLE_LONG,
+            OpportunityType.BUNDLE_SHORT,
+            OpportunityType.EVENT_BUNDLE_LONG,
+        )
     
     @property
     def is_market_making(self) -> bool:

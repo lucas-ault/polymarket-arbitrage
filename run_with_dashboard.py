@@ -32,8 +32,10 @@ from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
 from core.cross_platform_arb import CrossPlatformArbEngine
+from utils.bootstrap import bootstrap_components
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging, trade_logger
+from utils.profit_telemetry import ProfitTelemetry
 from utils.redis_cache import RedisCacheConfig, create_cache_store
 from dashboard.server import app, dashboard_state
 from dashboard.integration import DashboardIntegration
@@ -99,35 +101,21 @@ class TradingBotWithDashboard:
         
         self._running = True
         
-        # Initialize Polymarket API client
-        cache_config = RedisCacheConfig(
-            enabled=self.config.cache.enabled,
-            backend=self.config.cache.backend,
-            redis_url=self.config.cache.redis_url,
-            key_prefix=self.config.cache.key_prefix,
-            connect_timeout_seconds=self.config.cache.connect_timeout_seconds,
-            op_timeout_seconds=self.config.cache.op_timeout_seconds,
-            markets_ttl_seconds=self.config.cache.markets_ttl_seconds,
-            matches_ttl_seconds=self.config.cache.matches_ttl_seconds,
+        # Build the shared component graph once so bot-only and bot+dashboard
+        # entrypoints stay in lockstep on risk wiring, kill-switch hooks, and
+        # data-feed plumbing.
+        components = await bootstrap_components(
+            self.config,
+            on_market_update=self._on_market_update,
         )
-        self.cache_store = await create_cache_store(cache_config)
-        self.client = PolymarketClient(
-            public_url=self.config.api.polymarket_public_url,
-            private_url=self.config.api.polymarket_private_url,
-            markets_ws_url=self.config.api.polymarket_markets_ws_url,
-            private_ws_url=self.config.api.polymarket_private_ws_url,
-            key_id=self.config.api.key_id,
-            secret_key=self.config.api.secret_key,
-            timeout=self.config.api.timeout_seconds,
-            max_retries=self.config.api.max_retries,
-            retry_delay=self.config.api.retry_delay_seconds,
-            dry_run=self.config.is_dry_run,
-            use_websocket=self.config.api.use_websocket,
-            use_rest_fallback=self.config.api.use_rest_fallback,
-            cache_store=self.cache_store,
-            markets_cache_ttl_seconds=self.config.cache.markets_ttl_seconds,
-        )
-        await self.client.connect()
+        self.cache_store = components.cache_store
+        self.client = components.client
+        self.portfolio = components.portfolio
+        self.risk_manager = components.risk_manager
+        self.execution_engine = components.execution_engine
+        self.arb_engine = components.arb_engine
+        self.data_feed = components.data_feed
+        self.profit_telemetry = ProfitTelemetry()
         
         # Initialize Kalshi client (if cross-platform enabled)
         if self.config.mode.cross_platform_enabled and self.config.mode.kalshi_enabled:
@@ -152,66 +140,6 @@ class TradingBotWithDashboard:
             # Start Kalshi monitoring in background
             self._kalshi_task = asyncio.create_task(self._start_kalshi_monitoring(), name="kalshi_monitoring")
         
-        # Initialize portfolio
-        initial_balance = (
-            self.config.mode.dry_run_initial_balance 
-            if self.config.is_dry_run 
-            else 0.0
-        )
-        self.portfolio = Portfolio(initial_balance=initial_balance)
-        
-        # Initialize risk manager
-        self.risk_manager = RiskManager(RiskConfig(
-            max_position_per_market=self.config.risk.max_position_per_market,
-            max_global_exposure=self.config.risk.max_global_exposure,
-            max_daily_loss=self.config.risk.max_daily_loss,
-            max_drawdown_pct=self.config.risk.max_drawdown_pct,
-            min_peak_pnl_for_drawdown=self.config.risk.min_peak_pnl_for_drawdown,
-            trade_only_high_volume=self.config.risk.trade_only_high_volume,
-            min_24h_volume=self.config.risk.min_24h_volume,
-            whitelist=self.config.risk.whitelist,
-            blacklist=self.config.risk.blacklist,
-            kill_switch_enabled=self.config.risk.kill_switch_enabled,
-        ))
-        
-        # Initialize execution engine
-        self.execution_engine = ExecutionEngine(
-            client=self.client,
-            risk_manager=self.risk_manager,
-            portfolio=self.portfolio,
-            config=ExecutionConfig(
-                slippage_tolerance=self.config.trading.slippage_tolerance,
-                order_timeout_seconds=self.config.trading.order_timeout_seconds,
-                dry_run=self.config.is_dry_run,
-            ),
-        )
-        await self.execution_engine.start()
-        
-        # Initialize arb engine
-        self.arb_engine = ArbEngine(ArbConfig(
-            min_edge=self.config.trading.min_edge,
-            bundle_arb_enabled=self.config.trading.bundle_arb_enabled,
-            min_spread=self.config.trading.min_spread,
-            mm_enabled=self.config.trading.mm_enabled,
-            tick_size=self.config.trading.tick_size,
-            default_order_size=self.config.trading.default_order_size,
-            min_order_size=self.config.trading.min_order_size,
-            max_order_size=self.config.trading.max_order_size,
-            maker_fee_bps=self.config.trading.maker_fee_bps,
-            taker_fee_bps=self.config.trading.taker_fee_bps,
-            fee_theta_taker=self.config.trading.fee_theta_taker,
-            fee_theta_maker=self.config.trading.fee_theta_maker,
-        ))
-        
-        # Initialize data feed
-        market_ids = self.config.trading.markets.copy()
-        self.data_feed = DataFeed(
-            client=self.client,
-            market_ids=market_ids,
-            position_refresh_interval=30.0 if self.config.is_live else 5.0,
-            on_update=self._on_market_update,
-            config=self.config,
-        )
         await self.data_feed.start()
         
         # Initialize dashboard integration
@@ -221,6 +149,7 @@ class TradingBotWithDashboard:
             execution_engine=self.execution_engine,
             risk_manager=self.risk_manager,
             portfolio=self.portfolio,
+            profit_telemetry=self.profit_telemetry,
             mode="dry_run" if self.config.is_dry_run else "live",
         )
         await self.dashboard_integration.start()
@@ -297,6 +226,13 @@ class TradingBotWithDashboard:
                     edge=signal.opportunity.edge,
                     suggested_size=signal.opportunity.suggested_size,
                 )
+                if self.profit_telemetry:
+                    self.profit_telemetry.record_opportunity(
+                        market_id=signal.market_id,
+                        strategy=signal.opportunity.opportunity_type.value,
+                        edge=float(signal.opportunity.edge),
+                        fee_bps=self.config.trading.taker_fee_bps,
+                    )
             
             # Submit to execution
             if not self.execution_engine.submit_signal_nowait(signal):
@@ -374,6 +310,13 @@ class TradingBotWithDashboard:
                         trade = self.client.simulate_fill(order.order_id)
                         if trade:
                             self.execution_engine.handle_fill(trade)
+                            if self.profit_telemetry:
+                                self.profit_telemetry.record_fill(
+                                    market_id=trade.market_id,
+                                    price=float(trade.price),
+                                    size=float(trade.size),
+                                    fee=float(trade.fee),
+                                )
                             self.dashboard_integration.add_trade(
                                 side=trade.side.value,
                                 price=trade.price,
@@ -411,6 +354,13 @@ class TradingBotWithDashboard:
                         continue
                     self._seen_trade_ids.add(trade.trade_id)
                     self.execution_engine.handle_fill(trade)
+                    if self.profit_telemetry:
+                        self.profit_telemetry.record_fill(
+                            market_id=trade.market_id,
+                            price=float(trade.price),
+                            size=float(trade.size),
+                            fee=float(trade.fee),
+                        )
                     if self.dashboard_integration:
                         self.dashboard_integration.add_trade(
                             side=trade.side.value,
@@ -700,6 +650,26 @@ class TradingBotWithDashboard:
             cp_stats = self.cross_platform_engine.get_stats()
             logger.info(f"Cross-Platform Opportunities: {cp_stats['total_opportunities']}")
             logger.info(f"Matched Market Pairs: {cp_stats['matched_pairs']}")
+        
+        if self.profit_telemetry is not None:
+            tele = self.profit_telemetry.summary()
+            logger.info("-" * 60)
+            logger.info(
+                "Profit telemetry: opportunities=%s fills=%s fill_rate=%.2f%% notional=$%.2f fees=$%.2f",
+                tele["total_opportunities"],
+                tele["total_fills"],
+                tele["fill_rate"] * 100,
+                tele["total_fill_notional"],
+                tele["total_fees_paid"],
+            )
+            for strategy, row in tele["per_strategy"].items():
+                logger.info(
+                    "  [%s] opp=%s avg_edge=%.4f post_fee=%.4f",
+                    strategy,
+                    int(row["opportunities"]),
+                    row["avg_edge"],
+                    row["avg_post_fee_edge"],
+                )
         
         logger.info("Shutdown complete")
     

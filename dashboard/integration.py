@@ -30,6 +30,7 @@ class DashboardIntegration:
         execution_engine=None,
         risk_manager=None,
         portfolio=None,
+        profit_telemetry=None,
         mode: str = "dry_run",
     ):
         self.data_feed = data_feed
@@ -37,6 +38,7 @@ class DashboardIntegration:
         self.execution_engine = execution_engine
         self.risk_manager = risk_manager
         self.portfolio = portfolio
+        self.profit_telemetry = profit_telemetry
         
         dashboard_state.mode = mode
         dashboard_state.is_running = False
@@ -217,6 +219,12 @@ class DashboardIntegration:
                 "cache_last_read_ms": client_stats.get("cache_last_read_ms", 0.0),
                 "cache_last_write_ms": client_stats.get("cache_last_write_ms", 0.0),
             }
+        
+        if self.profit_telemetry is not None:
+            try:
+                dashboard_state.profit_telemetry = self.profit_telemetry.summary()
+            except Exception as exc:
+                logger.debug("Failed to refresh profit telemetry: %s", exc)
         
         self._loop_count += 1
         dashboard_state.operational["dashboard_update_ms"] = (time.perf_counter() - loop_started_at) * 1000

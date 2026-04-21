@@ -8,9 +8,9 @@ Enforces position limits, loss limits, and other risk constraints.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Set
+from typing import Awaitable, Callable, Optional, Set, Union
 
-from polymarket_client.models import Order, OrderSide, TokenType, Trade
+from polymarket_client.models import MarketState, Order, OrderSide, TokenType, Trade
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,9 @@ class RiskConfig:
     # Market filters
     trade_only_high_volume: bool = True
     min_24h_volume: float = 10000.0
+    # Reject orders on a market whose order book has not refreshed within this
+    # many seconds. 0 disables the staleness gate (e.g. for backtests).
+    max_market_staleness_seconds: float = 5.0
     
     # Whitelist/blacklist
     whitelist: list[str] = field(default_factory=list)
@@ -38,7 +41,13 @@ class RiskConfig:
     
     # Kill switch
     kill_switch_enabled: bool = True
+    # When true, the risk manager invokes the on_kill_switch callback on first
+    # trip. The intent is to cancel resting orders so we are not exposed to
+    # adverse fills while we figure out what happened.
     auto_unwind_on_breach: bool = False
+
+
+KillSwitchCallback = Callable[[str], Union[None, Awaitable[None]]]
 
 
 @dataclass
@@ -72,6 +81,15 @@ class RiskManager:
         
         # Volume cache
         self._market_volumes: dict[str, float] = {}
+        # Per-market last-update timestamp for staleness gating.
+        self._market_freshness: dict[str, datetime] = {}
+        # Counters for observability. Tests and the dashboard read these.
+        self._stale_market_rejections: int = 0
+        self._volume_rejections: int = 0
+        # Optional callback fired the first time the kill switch trips. Used by
+        # the runtime to cancel resting orders when auto_unwind_on_breach=True.
+        self._on_kill_switch: Optional[KillSwitchCallback] = None
+        self._kill_switch_callback_fired: bool = False
         
         # Trading session tracking
         self._session_start = datetime.utcnow()
@@ -81,8 +99,17 @@ class RiskManager:
             f"RiskManager initialized | "
             f"max_per_market={config.max_position_per_market} | "
             f"max_global={config.max_global_exposure} | "
-            f"max_daily_loss={config.max_daily_loss}"
+            f"max_daily_loss={config.max_daily_loss} | "
+            f"auto_unwind={config.auto_unwind_on_breach}"
         )
+
+    def set_kill_switch_callback(self, callback: Optional[KillSwitchCallback]) -> None:
+        """Register a callback fired the first time the kill switch trips.
+
+        The callback receives the trip reason. It can be sync or async; async
+        callbacks are scheduled on the running event loop.
+        """
+        self._on_kill_switch = callback
     
     def check_order(self, order: Order) -> bool:
         """
@@ -109,11 +136,30 @@ class RiskManager:
         if self.config.trade_only_high_volume:
             market_volume = self._market_volumes.get(order.market_id, 0)
             if market_volume < self.config.min_24h_volume:
+                self._volume_rejections += 1
                 logger.warning(
                     f"Order rejected: market {order.market_id} volume "
                     f"({market_volume:.0f}) below minimum ({self.config.min_24h_volume})"
                 )
                 return False
+        
+        # Stale-market check: if we have a freshness entry for this market,
+        # require it to be within max_market_staleness_seconds. We intentionally
+        # only enforce this when the market is registered, so backtests / unit
+        # tests that never register freshness keep working.
+        if self.config.max_market_staleness_seconds > 0:
+            last_seen = self._market_freshness.get(order.market_id)
+            if last_seen is not None:
+                staleness = (datetime.utcnow() - last_seen).total_seconds()
+                if staleness > self.config.max_market_staleness_seconds:
+                    self._stale_market_rejections += 1
+                    logger.warning(
+                        "Order rejected: market %s data is stale (%.2fs > %.2fs)",
+                        order.market_id,
+                        staleness,
+                        self.config.max_market_staleness_seconds,
+                    )
+                    return False
         
         # Per-market exposure check (count only incremental absolute exposure).
         current_market_exposure = self._market_exposure.get(order.market_id, 0.0)
@@ -211,22 +257,75 @@ class RiskManager:
     
     def update_market_volume(self, market_id: str, volume_24h: float) -> None:
         """Update cached 24h volume for a market."""
-        self._market_volumes[market_id] = volume_24h
+        try:
+            self._market_volumes[market_id] = float(volume_24h)
+        except (TypeError, ValueError):
+            return
     
     def set_market_volumes(self, volumes: dict[str, float]) -> None:
         """Bulk update market volumes."""
-        self._market_volumes.update(volumes)
+        for market_id, volume in volumes.items():
+            self.update_market_volume(market_id, volume)
+    
+    def register_market_state(self, state: "MarketState") -> None:
+        """Record liquidity / freshness from a MarketState update.
+
+        Called by the data feed on every market update so that risk gates can
+        cite real, current values instead of relying on the runtime to
+        explicitly populate volume caches.
+        """
+        market = getattr(state, "market", None)
+        if market is None:
+            return
+        market_id = getattr(market, "market_id", None)
+        if not market_id:
+            return
+        volume = getattr(market, "volume_24h", None)
+        if volume is not None:
+            self.update_market_volume(market_id, float(volume))
+        self._market_freshness[market_id] = getattr(state, "timestamp", datetime.utcnow())
     
     def _trigger_kill_switch(self, reason: str) -> None:
         """Trigger the kill switch to stop trading."""
+        already_tripped = self.state.kill_switch_triggered
         self.state.kill_switch_triggered = True
         self.state.kill_switch_reason = reason
         logger.critical(f"KILL SWITCH TRIGGERED: {reason}")
+        if already_tripped or self._kill_switch_callback_fired:
+            return
+        if not self.config.auto_unwind_on_breach:
+            return
+        callback = self._on_kill_switch
+        if callback is None:
+            return
+        self._kill_switch_callback_fired = True
+        try:
+            result = callback(reason)
+        except Exception as exc:
+            logger.error("Kill-switch callback raised synchronously: %s", exc)
+            return
+        if result is None:
+            return
+        # Async callback: schedule on the running loop if there is one.
+        try:
+            import asyncio
+
+            loop = asyncio.get_running_loop()
+            loop.create_task(result)  # type: ignore[arg-type]
+        except RuntimeError:
+            # No running loop (sync caller). Best-effort: run to completion.
+            try:
+                import asyncio
+
+                asyncio.run(result)  # type: ignore[arg-type]
+            except Exception as exc:
+                logger.error("Failed to execute async kill-switch callback: %s", exc)
     
     def reset_kill_switch(self) -> None:
         """Reset the kill switch (use with caution)."""
         self.state.kill_switch_triggered = False
         self.state.kill_switch_reason = ""
+        self._kill_switch_callback_fired = False
         logger.warning("Kill switch reset")
     
     def within_global_limits(self) -> bool:
@@ -280,6 +379,14 @@ class RiskManager:
             "markets_with_exposure": len([m for m, e in self._market_exposure.items() if e > 0]),
             "session_trade_count": len(self._session_trades),
             "within_limits": self.within_global_limits(),
+            "auto_unwind_on_breach": self.config.auto_unwind_on_breach,
+            "stale_market_rejections": self._stale_market_rejections,
+            "volume_rejections": self._volume_rejections,
+            "max_market_staleness_seconds": self.config.max_market_staleness_seconds,
+            "trade_only_high_volume": self.config.trade_only_high_volume,
+            "min_24h_volume": self.config.min_24h_volume,
+            "tracked_market_volumes": len(self._market_volumes),
+            "tracked_market_freshness": len(self._market_freshness),
         }
     
     def add_to_blacklist(self, market_id: str) -> None:

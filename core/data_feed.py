@@ -41,12 +41,17 @@ class DataFeed:
         position_refresh_interval: float = 5.0,
         on_update: Optional[Callable[[str, MarketState], None]] = None,
         config = None,
+        risk_manager=None,
     ):
         self.client = client
         self.market_ids = market_ids
         self.position_refresh_interval = position_refresh_interval
         self.on_update = on_update
         self.config = config
+        # Optional handle so the data feed can forward each MarketState into the
+        # risk manager (volume cache + freshness gate). The runtime sets this
+        # after constructing both objects.
+        self.risk_manager = risk_manager
         
         # In-memory state
         self._markets: dict[str, Market] = {}
@@ -57,7 +62,12 @@ class DataFeed:
         # Tasks
         self._orderbook_task: Optional[asyncio.Task] = None
         self._position_task: Optional[asyncio.Task] = None
+        self._discovery_task: Optional[asyncio.Task] = None
         self._running = False
+        # How often (seconds) to refresh market discovery in the background.
+        # 0 disables the refresh entirely. Only meaningful when the operator
+        # opted into auto-discovery (no explicit market_ids).
+        self._discovery_refresh_interval: float = 300.0
         
         # Statistics
         self._update_count = 0
@@ -106,6 +116,16 @@ class DataFeed:
             name="position_refresh"
         )
         
+        # Start background discovery refresh only if we are auto-discovering
+        # markets; explicit lists do not need rediscovery.
+        if not (self.config and getattr(self.config, "trading", None) and
+                self.config.trading.markets):
+            if self._discovery_refresh_interval > 0:
+                self._discovery_task = asyncio.create_task(
+                    self._discovery_refresh_loop(),
+                    name="market_discovery_refresh",
+                )
+        
         logger.info("DataFeed started successfully")
     
     async def stop(self) -> None:
@@ -126,7 +146,37 @@ class DataFeed:
             except asyncio.CancelledError:
                 pass
         
+        if self._discovery_task:
+            self._discovery_task.cancel()
+            try:
+                await self._discovery_task
+            except asyncio.CancelledError:
+                pass
+        
         logger.info("DataFeed stopped")
+    
+    async def _discovery_refresh_loop(self) -> None:
+        """Periodically re-discover markets so new listings come online without restart."""
+        while self._running:
+            try:
+                await asyncio.sleep(self._discovery_refresh_interval)
+                if not self._running:
+                    return
+                # Force-refresh bypasses both the in-memory and Redis caches.
+                discovered = await self.client.list_markets(force_refresh=True)
+                added = 0
+                for market in discovered:
+                    if market.market_id not in self._markets:
+                        self._markets[market.market_id] = market
+                        if market.market_id not in self.market_ids:
+                            self.market_ids.append(market.market_id)
+                        added += 1
+                if added:
+                    logger.info("Market discovery refresh added %s new markets", added)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Market discovery refresh failed: %s", exc)
     
     async def _fetch_markets(self) -> None:
         """Fetch market information for all monitored markets."""
@@ -281,6 +331,14 @@ class DataFeed:
         
         self._market_states[market_id] = state
         
+        # Forward freshness + volume into the risk manager so the trading
+        # loop's gates rely on the same data the strategy is consuming.
+        if self.risk_manager is not None:
+            try:
+                self.risk_manager.register_market_state(state)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("risk_manager.register_market_state failed: %s", exc)
+        
         # Notify callback if set
         if self.on_update:
             try:
@@ -419,15 +477,27 @@ class DataFeed:
             "dirty_market_count": float(len(self._dirty_market_ids)),
         }
     
-    async def wait_for_data(self, timeout: float = 10.0) -> bool:
+    async def wait_for_data(
+        self,
+        timeout: float = 10.0,
+        *,
+        min_markets: Optional[int] = None,
+    ) -> bool:
         """
-        Wait until data is available for all markets.
+        Wait until order book data is available.
         
-        Returns True if data is available, False on timeout.
+        ``min_markets`` lets the caller proceed when a useful subset of the
+        discovered universe has loaded, instead of blocking on the full set.
+        Defaults to "all monitored markets" for backward compatibility.
+        Returns True when the threshold is met, False on timeout.
         """
         start = datetime.utcnow()
         while (datetime.utcnow() - start).total_seconds() < timeout:
-            if all(m in self._order_books for m in self.market_ids):
+            book_count = sum(1 for m in self.market_ids if m in self._order_books)
+            if min_markets is not None:
+                if book_count >= min_markets:
+                    return True
+            elif self.market_ids and book_count == len(self.market_ids):
                 return True
             await asyncio.sleep(0.1)
         return False

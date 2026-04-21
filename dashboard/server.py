@@ -34,6 +34,7 @@ class DashboardState:
         self.stats: dict = {}
         self.timing: dict = {}  # Opportunity timing stats
         self.operational: dict = {}  # Operational stats
+        self.profit_telemetry: dict = {}  # Profit telemetry summary by strategy
         self.is_running: bool = False
         self.mode: str = "dry_run"
         self.last_update: datetime = datetime.utcnow()
@@ -96,6 +97,7 @@ class DashboardState:
             "stats": self.stats,
             "timing": self.timing,  # Opportunity timing stats
             "operational": operational,  # Operational stats
+            "profit_telemetry": self.profit_telemetry,  # Per-strategy edge & fill stats
             "cross_platform": self.cross_platform,  # Cross-platform arbitrage stats
             "is_running": self.is_running,
             "mode": self.mode,
@@ -246,6 +248,33 @@ def create_app() -> FastAPI:
     async def get_timing():
         """Get opportunity timing statistics."""
         return dashboard_state.timing
+    
+    @app.get("/api/profit")
+    async def get_profit():
+        """Get profit telemetry (per-strategy edge and fills)."""
+        return dashboard_state.profit_telemetry
+    
+    @app.get("/api/health")
+    async def get_health():
+        """Operator health snapshot: live readiness, kill switch, stale markets."""
+        risk = dashboard_state.risk or {}
+        operational = dashboard_state.operational or {}
+        return {
+            "is_running": dashboard_state.is_running,
+            "mode": dashboard_state.mode,
+            "kill_switch_triggered": bool(risk.get("kill_switch_triggered")),
+            "auto_unwind_on_breach": bool(risk.get("auto_unwind_on_breach")),
+            "stale_market_rejections": int(risk.get("stale_market_rejections", 0) or 0),
+            "volume_rejections": int(risk.get("volume_rejections", 0) or 0),
+            "max_market_staleness_seconds": risk.get("max_market_staleness_seconds"),
+            "is_streaming": bool(operational.get("is_streaming")),
+            "stream_errors": int(operational.get("stream_errors", 0) or 0),
+            "stream_reconnects": int(operational.get("stream_reconnects", 0) or 0),
+            "avg_staleness_seconds": operational.get("avg_staleness_seconds"),
+            "p95_staleness_seconds": operational.get("p95_staleness_seconds"),
+            "max_staleness_seconds": operational.get("max_staleness_seconds"),
+            "last_update": dashboard_state.last_update.isoformat(),
+        }
     
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket):
@@ -1472,7 +1501,13 @@ def get_embedded_html() -> str:
                     </div>
                 </div>
                 <div id="killSwitch" style="display: none; padding: 0.75rem; background: rgba(255,68,102,0.2); border-radius: 8px; text-align: center; color: var(--accent-red); font-weight: 600;">
-                    ⚠️ KILL SWITCH ACTIVE
+                    ⚠️ KILL SWITCH ACTIVE <span id="killSwitchReason" style="font-weight: 400; font-size: 0.8rem;"></span>
+                </div>
+                <div id="riskGuards" style="margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-secondary); display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem;">
+                    <div>Stale rejects: <span id="staleRejects" style="color: var(--text-primary);">0</span></div>
+                    <div>Volume rejects: <span id="volumeRejects" style="color: var(--text-primary);">0</span></div>
+                    <div>Auto-unwind: <span id="autoUnwind" style="color: var(--text-primary);">off</span></div>
+                    <div>Max staleness: <span id="maxStaleness" style="color: var(--text-primary);">--</span></div>
                 </div>
             </div>
         </section>
@@ -1870,6 +1905,25 @@ def get_embedded_html() -> str:
             document.getElementById('drawdownBar').className = `risk-bar-fill ${drawdownPct < 50 ? 'safe' : drawdownPct < 80 ? 'warning' : 'danger'}`;
             
             document.getElementById('killSwitch').style.display = risk.kill_switch_triggered ? 'block' : 'none';
+            const killReasonEl = document.getElementById('killSwitchReason');
+            if (killReasonEl) {
+                killReasonEl.textContent = risk.kill_switch_reason ? `— ${risk.kill_switch_reason}` : '';
+            }
+            
+            const staleEl = document.getElementById('staleRejects');
+            const volumeEl = document.getElementById('volumeRejects');
+            const autoUnwindEl = document.getElementById('autoUnwind');
+            const maxStalenessEl = document.getElementById('maxStaleness');
+            if (staleEl) staleEl.textContent = risk.stale_market_rejections || 0;
+            if (volumeEl) volumeEl.textContent = risk.volume_rejections || 0;
+            if (autoUnwindEl) {
+                autoUnwindEl.textContent = risk.auto_unwind_on_breach ? 'on' : 'off';
+                autoUnwindEl.style.color = risk.auto_unwind_on_breach ? 'var(--accent-green)' : 'var(--text-secondary)';
+            }
+            if (maxStalenessEl) {
+                const s = risk.max_market_staleness_seconds;
+                maxStalenessEl.textContent = (s !== undefined && s !== null) ? `${s}s` : '--';
+            }
         }
         
         function updateTiming() {

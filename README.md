@@ -268,6 +268,8 @@ Detailed docs live in `docs/`:
 - `docs/README.md`
 - `docs/ai-repo-map.md`
 - `docs/architecture.md`
+- `docs/operations.md` — operations, mode matrix, live-readiness gates
+- `docs/best-practices.md` — Polymarket guidance + bot operating playbook
 - `docs/features/trading-bot.md`
 - `docs/features/polymarket-data-feed.md`
 - `docs/features/strategies.md`
@@ -281,7 +283,8 @@ Detailed docs live in `docs/`:
 - WebSocket ingestion uses signed `polymarket.us` streams with REST fallback; under repeated WS failures, effective update cadence falls back to polling speed.
 - The adapter uses tolerant response parsing to support SDK/raw API fallbacks, so some newly-added endpoint fields may not be surfaced yet in internal models.
 - Cross-platform matching is operational for discovery and dashboard display, but cross-platform trading is not wired into the execution loop.
-- Some config keys are documented in code/config but not fully consumed by the entrypoints.
+- Order sizes are rounded to whole contracts on send; size loss greater than 5 % is logged. Configure strategy sizing to keep this overhead small.
+- `risk.auto_unwind_on_breach` cancels open orders via a kill-switch callback; it does not flatten existing positions automatically.
 
 ## Safety
 - Start with `dry_run`

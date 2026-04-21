@@ -27,8 +27,10 @@ from core.arb_engine import ArbEngine, ArbConfig
 from core.execution import ExecutionEngine, ExecutionConfig
 from core.risk_manager import RiskManager, RiskConfig
 from core.portfolio import Portfolio
+from utils.bootstrap import bootstrap_components
 from utils.config_loader import load_config, BotConfig
 from utils.logging_utils import setup_logging, performance_logger, trade_logger
+from utils.profit_telemetry import ProfitTelemetry
 from utils.redis_cache import RedisCacheConfig, create_cache_store
 
 
@@ -60,6 +62,9 @@ class TradingBot:
         self._start_time: Optional[datetime] = None
         self._update_count = 0
         self._signal_count = 0
+        self.profit_telemetry: Optional[ProfitTelemetry] = None
+        self._seen_trade_ids: set[str] = set()
+        self._live_fill_bootstrapped: bool = False
     
     async def start(self) -> None:
         """Initialize and start all components."""
@@ -72,96 +77,21 @@ class TradingBot:
         self._start_time = datetime.utcnow()
         self._running = True
         
-        # Initialize API client
-        cache_config = RedisCacheConfig(
-            enabled=self.config.cache.enabled,
-            backend=self.config.cache.backend,
-            redis_url=self.config.cache.redis_url,
-            key_prefix=self.config.cache.key_prefix,
-            connect_timeout_seconds=self.config.cache.connect_timeout_seconds,
-            op_timeout_seconds=self.config.cache.op_timeout_seconds,
-            markets_ttl_seconds=self.config.cache.markets_ttl_seconds,
-            matches_ttl_seconds=self.config.cache.matches_ttl_seconds,
+        # Build the shared component graph (cache, client, portfolio, risk,
+        # execution, arb engine, data feed) via the central bootstrap helper.
+        components = await bootstrap_components(
+            self.config,
+            on_market_update=self._on_market_update,
         )
-        self.cache_store = await create_cache_store(cache_config)
-        self.client = PolymarketClient(
-            public_url=self.config.api.polymarket_public_url,
-            private_url=self.config.api.polymarket_private_url,
-            markets_ws_url=self.config.api.polymarket_markets_ws_url,
-            private_ws_url=self.config.api.polymarket_private_ws_url,
-            key_id=self.config.api.key_id,
-            secret_key=self.config.api.secret_key,
-            timeout=self.config.api.timeout_seconds,
-            max_retries=self.config.api.max_retries,
-            retry_delay=self.config.api.retry_delay_seconds,
-            dry_run=self.config.is_dry_run,
-            use_websocket=self.config.api.use_websocket,
-            use_rest_fallback=self.config.api.use_rest_fallback,
-            cache_store=self.cache_store,
-            markets_cache_ttl_seconds=self.config.cache.markets_ttl_seconds,
-        )
-        await self.client.connect()
+        self.cache_store = components.cache_store
+        self.client = components.client
+        self.portfolio = components.portfolio
+        self.risk_manager = components.risk_manager
+        self.execution_engine = components.execution_engine
+        self.arb_engine = components.arb_engine
+        self.data_feed = components.data_feed
+        self.profit_telemetry = ProfitTelemetry()
         
-        # Initialize portfolio
-        initial_balance = (
-            self.config.mode.dry_run_initial_balance 
-            if self.config.is_dry_run 
-            else 0.0
-        )
-        self.portfolio = Portfolio(initial_balance=initial_balance)
-        
-        # Initialize risk manager
-        self.risk_manager = RiskManager(RiskConfig(
-            max_position_per_market=self.config.risk.max_position_per_market,
-            max_global_exposure=self.config.risk.max_global_exposure,
-            max_daily_loss=self.config.risk.max_daily_loss,
-            max_drawdown_pct=self.config.risk.max_drawdown_pct,
-            trade_only_high_volume=self.config.risk.trade_only_high_volume,
-            min_24h_volume=self.config.risk.min_24h_volume,
-            whitelist=self.config.risk.whitelist,
-            blacklist=self.config.risk.blacklist,
-            kill_switch_enabled=self.config.risk.kill_switch_enabled,
-            auto_unwind_on_breach=self.config.risk.auto_unwind_on_breach,
-        ))
-        
-        # Initialize execution engine
-        self.execution_engine = ExecutionEngine(
-            client=self.client,
-            risk_manager=self.risk_manager,
-            portfolio=self.portfolio,
-            config=ExecutionConfig(
-                slippage_tolerance=self.config.trading.slippage_tolerance,
-                order_timeout_seconds=self.config.trading.order_timeout_seconds,
-                dry_run=self.config.is_dry_run,
-            ),
-        )
-        await self.execution_engine.start()
-        
-        # Initialize arbitrage engine
-        self.arb_engine = ArbEngine(ArbConfig(
-            min_edge=self.config.trading.min_edge,
-            bundle_arb_enabled=self.config.trading.bundle_arb_enabled,
-            min_spread=self.config.trading.min_spread,
-            mm_enabled=self.config.trading.mm_enabled,
-            tick_size=self.config.trading.tick_size,
-            default_order_size=self.config.trading.default_order_size,
-            min_order_size=self.config.trading.min_order_size,
-            max_order_size=self.config.trading.max_order_size,
-            maker_fee_bps=self.config.trading.maker_fee_bps,
-            taker_fee_bps=self.config.trading.taker_fee_bps,
-            fee_theta_taker=self.config.trading.fee_theta_taker,
-            fee_theta_maker=self.config.trading.fee_theta_maker,
-        ))
-        
-        # Initialize data feed
-        market_ids = self.config.trading.markets.copy()
-        self.data_feed = DataFeed(
-            client=self.client,
-            market_ids=market_ids,
-            position_refresh_interval=5.0,
-            on_update=self._on_market_update,
-            config=self.config,
-        )
         await self.data_feed.start()
         
         # Wait for initial data
@@ -173,15 +103,22 @@ class TradingBot:
         logger.info("-" * 60)
         
         # Start monitoring loop
-        asyncio.create_task(self._monitoring_loop())
+        asyncio.create_task(self._monitoring_loop(), name="monitoring_loop")
         
-        # Start fill simulation for dry run
+        # Start fill simulation for dry run; for live, sync exchange state.
         if self.config.is_dry_run and self.config.mode.simulate_fills:
-            asyncio.create_task(self._simulate_fills())
+            asyncio.create_task(self._simulate_fills(), name="simulate_fills")
+        elif not self.config.is_dry_run:
+            asyncio.create_task(self._poll_live_fills(), name="poll_live_fills")
+            asyncio.create_task(self._sync_live_portfolio_metrics(), name="sync_live_portfolio")
     
     def _on_market_update(self, market_id: str, market_state) -> None:
         """Callback for market state updates."""
         self._update_count += 1
+        
+        # Mark portfolio to latest mid before evaluating risk so unrealized PnL
+        # tracks the live book even in headless mode.
+        self._mark_portfolio_to_market(market_id, market_state)
         
         # Check risk limits
         if not self.risk_manager.within_global_limits():
@@ -193,8 +130,104 @@ class TradingBot:
         
         for signal in signals:
             self._signal_count += 1
+            if self.profit_telemetry and signal.opportunity:
+                self.profit_telemetry.record_opportunity(
+                    market_id=signal.market_id,
+                    strategy=signal.opportunity.opportunity_type.value,
+                    edge=signal.opportunity.edge,
+                    fee_bps=self.config.trading.taker_fee_bps,
+                )
             if not self.execution_engine.submit_signal_nowait(signal):
                 logger.warning("Execution queue is full, dropping signal %s", signal.signal_id)
+    
+    @staticmethod
+    def _pick_mark_price(best_bid, best_ask, fallback) -> Optional[float]:
+        bid = float(best_bid) if best_bid is not None else 0.0
+        ask = float(best_ask) if best_ask is not None else 0.0
+        fb = float(fallback) if fallback is not None else 0.0
+        if bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if ask > 0:
+            return ask
+        if bid > 0:
+            return bid
+        if fb > 0:
+            return fb
+        return None
+    
+    def _mark_portfolio_to_market(self, market_id: str, market_state) -> None:
+        if not self.portfolio:
+            return
+        order_book = market_state.order_book
+        market = market_state.market
+        yes_price = self._pick_mark_price(order_book.best_bid_yes, order_book.best_ask_yes, market.yes_price)
+        no_price = self._pick_mark_price(order_book.best_bid_no, order_book.best_ask_no, market.no_price)
+        if yes_price is None and no_price is not None:
+            yes_price = max(0.0, min(1.0, 1.0 - no_price))
+        if no_price is None and yes_price is not None:
+            no_price = max(0.0, min(1.0, 1.0 - yes_price))
+        if yes_price is None or no_price is None:
+            return
+        self.portfolio.update_prices(market_id, yes_price=yes_price, no_price=no_price)
+        if self.risk_manager:
+            pnl = self.portfolio.get_pnl()
+            self.risk_manager.update_pnl(
+                realized_pnl=float(pnl.get("realized_pnl", 0.0)),
+                unrealized_pnl=float(pnl.get("unrealized_pnl", 0.0)),
+            )
+    
+    async def _poll_live_fills(self) -> None:
+        """Mirror exchange trades into local execution / portfolio state."""
+        if not self.client or not self.execution_engine:
+            return
+        while self._running:
+            try:
+                await asyncio.sleep(1.5)
+                trades = await self.client.get_trades(limit=200)
+                if not trades:
+                    continue
+                if not self._live_fill_bootstrapped:
+                    for trade in trades:
+                        if trade.trade_id:
+                            self._seen_trade_ids.add(trade.trade_id)
+                    self._live_fill_bootstrapped = True
+                    logger.info(
+                        "Live fill poll bootstrapped with %s historical trades; processing only new fills",
+                        len(self._seen_trade_ids),
+                    )
+                    continue
+                for trade in sorted(trades, key=lambda t: getattr(t, "timestamp", datetime.utcnow())):
+                    if not trade.trade_id or trade.trade_id in self._seen_trade_ids:
+                        continue
+                    self._seen_trade_ids.add(trade.trade_id)
+                    self.execution_engine.handle_fill(trade)
+                    if self.profit_telemetry:
+                        self.profit_telemetry.record_fill(
+                            market_id=trade.market_id,
+                            price=float(trade.price),
+                            size=float(trade.size),
+                            fee=float(trade.fee),
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"Live fill poll error: {exc}")
+    
+    async def _sync_live_portfolio_metrics(self) -> None:
+        """Pull authoritative portfolio metrics from the exchange periodically."""
+        if not self.client or not self.portfolio:
+            return
+        while self._running:
+            try:
+                await asyncio.sleep(15.0)
+                metrics = await self.client.get_portfolio_metrics(activity_limit=200)
+                if not metrics:
+                    continue
+                self.portfolio.apply_exchange_metrics(metrics)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error(f"Portfolio sync error: {exc}")
     
     async def _monitoring_loop(self) -> None:
         """Periodic monitoring and logging."""
@@ -255,6 +288,13 @@ class TradingBot:
                         trade = self.client.simulate_fill(order.order_id)
                         if trade:
                             self.execution_engine.handle_fill(trade)
+                            if self.profit_telemetry:
+                                self.profit_telemetry.record_fill(
+                                    market_id=trade.market_id,
+                                    price=float(trade.price),
+                                    size=float(trade.size),
+                                    fee=float(trade.fee),
+                                )
                             
             except asyncio.CancelledError:
                 break
@@ -294,6 +334,33 @@ class TradingBot:
             logger.info(f"Bundle Opportunities: {stats.bundle_opportunities_detected}")
             logger.info(f"MM Opportunities: {stats.mm_opportunities_detected}")
             logger.info(f"Signals Generated: {stats.signals_generated}")
+        
+        if self.profit_telemetry is not None:
+            tele = self.profit_telemetry.summary()
+            logger.info("-" * 60)
+            logger.info("Profit Telemetry")
+            logger.info(
+                "  Opportunities=%s Fills=%s Fill rate=%.2f%%",
+                tele["total_opportunities"],
+                tele["total_fills"],
+                tele["fill_rate"] * 100,
+            )
+            logger.info(
+                "  Notional=$%.2f Fees paid=$%.2f Net=$%.2f",
+                tele["total_fill_notional"],
+                tele["total_fees_paid"],
+                tele["total_fill_notional"] - tele["total_fees_paid"],
+            )
+            for strategy, row in tele["per_strategy"].items():
+                logger.info(
+                    "  [%s] opp=%s avg_edge=%.4f post_fee=%.4f min=%.4f max=%.4f",
+                    strategy,
+                    int(row["opportunities"]),
+                    row["avg_edge"],
+                    row["avg_post_fee_edge"],
+                    row["min_edge"],
+                    row["max_edge"],
+                )
         
         logger.info("=" * 60)
         logger.info("Bot stopped")

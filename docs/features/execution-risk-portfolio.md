@@ -61,6 +61,13 @@ The kill switch can be triggered by:
 
 When active, `check_order()` rejects new orders and `within_global_limits()` returns false.
 
+If `risk.auto_unwind_on_breach` is enabled, the runtime registers an async
+callback via `RiskManager.set_kill_switch_callback()` that fires on first
+trip. The bootstrap path wires this callback to
+`ExecutionEngine.cancel_all_orders()` so that working orders are pulled
+immediately when the kill switch trips. Existing positions are not
+auto-flattened.
+
 ### Exposure model
 The risk manager tracks:
 
@@ -69,13 +76,19 @@ The risk manager tracks:
 - session trades
 - daily PnL and drawdown state
 
-### Volume filter note
-If `trade_only_high_volume` is enabled, `RiskManager` expects market volume to be populated through:
+### Volume and freshness gating
+If `trade_only_high_volume` is enabled, `RiskManager` expects market volume to
+be populated through:
 
 - `update_market_volume()`
 - `set_market_volumes()`
+- `register_market_state(MarketState)` — updates volume **and** freshness
 
-The main runtime path does not currently populate this cache from discovered markets.
+`DataFeed` calls `register_market_state` on every order-book update, so volume
+and per-market staleness are tracked automatically as long as the feed is
+running. `risk.max_market_staleness_seconds` rejects orders for markets whose
+last update is older than the configured threshold; the rejection counter is
+exposed in `RiskManager.get_summary()`.
 
 ## Portfolio
 ### Responsibilities
@@ -101,7 +114,11 @@ The main runtime path does not currently populate this cache from discovered mar
 - cash balance updates
 
 ### Price marking
-Unrealized PnL is only recalculated when `update_prices()` is called. The main runtime flow does not currently wire live market prices back into the portfolio for continuous mark-to-market updates, so unrealized PnL may stay limited depending on the execution path.
+Unrealized PnL is recalculated whenever `update_prices()` is called. Both
+`main.py` and `run_with_dashboard.py` continuously mark the portfolio to mid
+inside `_on_market_update()` via `_mark_portfolio_to_market()`, so unrealized
+PnL reflects current order books. In live mode the dashboard runner also
+polls `/v1/portfolio/metrics` to reconcile cash and PnL with the exchange.
 
 ## Dry-Run Interaction
 In dry run:
@@ -135,8 +152,8 @@ Covers:
 
 ## Known Limitations
 - Risk exposures are not netted with complex hedging semantics; they are tracked using notional deltas in a simplified way.
-- Portfolio marking depends on explicit `update_prices()` calls, which are not continuously driven by the main bot loop.
-- Live order placement and position retrieval rely on client code that still contains partial/in-progress integration behavior.
+- `auto_unwind_on_breach` cancels working orders but does not auto-flatten existing positions.
+- Order sizes are rounded to whole contracts before submission; large rounding (>5 %) is logged as a warning by the API client.
 
 ## Related Docs
 - `trading-bot.md`

@@ -44,24 +44,35 @@ flowchart LR
 ```
 
 ## Entrypoints
+Both entrypoints share `utils/bootstrap.bootstrap_components()`, which builds
+the cache, Polymarket client, portfolio, risk manager, execution engine, arb
+engine, and data feed in a single place. This guarantees the headless and
+dashboard runtimes have the same risk wiring (kill-switch callback,
+auto-unwind, market-staleness gating, profit telemetry, etc.).
+
 ### `main.py`
 `TradingBot` is the simplest production path. It:
 
 1. loads configuration
-2. creates the Polymarket client
-3. creates portfolio, risk, execution, and arb components
-4. starts the data feed
-5. reacts to feed updates with `_on_market_update()`
-6. optionally simulates fills in dry run
-7. logs periodic portfolio/risk snapshots
+2. calls `bootstrap_components()` to assemble the trading stack
+3. starts the execution engine and data feed
+4. reacts to feed updates with `_on_market_update()`
+5. in live mode, polls fills and reconciles portfolio metrics with the
+   exchange (`_poll_live_fills`, `_sync_live_portfolio_metrics`)
+6. in dry-run, simulates fills and records them in `ProfitTelemetry`
+7. continuously marks the portfolio to mid (`_mark_portfolio_to_market`) so
+   PnL reflects current prices rather than only realized fills
+8. logs periodic portfolio, risk, and profit-telemetry snapshots
 
 ### `run_with_dashboard.py`
-`TradingBotWithDashboard` extends the same flow with:
+`TradingBotWithDashboard` reuses the same bootstrap and adds:
 
 - `DashboardIntegration`
 - `uvicorn` server startup
 - optional Kalshi market loading
 - background market matching between Polymarket and Kalshi
+- live fill polling, portfolio reconciliation, and profit telemetry mirroring
+  `main.py` so the two runtimes behave identically on the trading path
 
 ## Data Flow
 ### Polymarket-only path
@@ -115,7 +126,7 @@ At present, this path does not turn matched pairs into live cross-platform trade
 | `polymarket_client/` | market data, order books, simulated/live order interfaces, shared models |
 | `kalshi_client/` | Kalshi market data and order book conversion |
 | `dashboard/` | server, dashboard state, UI bridge |
-| `utils/` | config parsing, logging, backtest support |
+| `utils/` | config parsing, logging, backtest support, shared bootstrap, profit telemetry |
 | `tests/` | unit tests for core engine pieces |
 
 ## Main State Objects
@@ -169,8 +180,13 @@ Two different simulation paths exist:
 `utils/backtest.py` contains a separate simulated market engine used by `main.py --backtest`.
 
 ## Architectural Caveats
-- The data feed docstring mentions WebSocket subscription, but the active Polymarket live path is REST polling.
-- The dashboard path fully supports market matching progress, but not live cross-platform execution.
-- Some config values are defined in `config.yaml` and dataclasses but not forwarded into the runtime components that would use them.
-- Live authenticated trading support exists as an interface shape, but parts of the client still contain TODO-style placeholders.
+- The Polymarket live path uses REST polling for order books and positions; the
+  WebSocket interface is documented but not yet the active feed.
+- The dashboard path fully supports market matching progress, but does not turn
+  matched Polymarket/Kalshi pairs into live cross-platform execution.
+- Live authenticated trading is functional, but order sizes are rounded to
+  whole contracts on send; size loss greater than 5 % is logged as a warning.
+- `RiskManager.auto_unwind_on_breach` triggers `ExecutionEngine.cancel_all_orders`
+  via a callback registered during bootstrap; it does not flatten existing
+  positions automatically.
 

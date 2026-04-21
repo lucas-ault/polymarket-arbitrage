@@ -67,6 +67,9 @@ class RiskConfig:
     min_peak_pnl_for_drawdown: float = 1.0
     trade_only_high_volume: bool = True
     min_24h_volume: float = 10000.0
+    # Reject orders against markets whose order book has not refreshed within
+    # this many seconds. 0 disables the check (e.g. for backtests).
+    max_market_staleness_seconds: float = 5.0
     whitelist: list[str] = field(default_factory=list)
     blacklist: list[str] = field(default_factory=list)
     kill_switch_enabled: bool = True
@@ -334,6 +337,12 @@ def _validate_config(config: BotConfig) -> None:
         errors.append("risk.max_drawdown_pct must be between 0 and 1")
     if config.risk.min_peak_pnl_for_drawdown < 0:
         errors.append("risk.min_peak_pnl_for_drawdown must be non-negative")
+    if config.risk.max_market_staleness_seconds < 0:
+        errors.append("risk.max_market_staleness_seconds must be non-negative")
+    
+    # Mode <-> data sanity (live mode against synthetic books would be unsafe).
+    if config.is_live and config.use_simulation:
+        errors.append("Refusing to run trading_mode=live with data_mode=simulation")
     
     # Mode validation
     if config.mode.trading_mode.lower() not in ("live", "dry_run"):

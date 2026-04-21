@@ -398,15 +398,26 @@ class PolymarketClient(BasePolymarketClient):
         if stored:
             self._runtime_stats["cache_markets_writes"] += 1
 
-    async def list_markets(self, filters: Optional[dict] = None) -> list[Market]:
+    async def list_markets(
+        self,
+        filters: Optional[dict] = None,
+        *,
+        force_refresh: bool = False,
+    ) -> list[Market]:
         params = filters.copy() if filters else {}
         params.setdefault("active", True)
 
-        if self._markets_cache:
-            return list(self._markets_cache.values())
+        if force_refresh:
+            # Drop in-memory and warm-cache snapshots so we definitely re-hit
+            # the API. Used by background discovery refresh in the data feed.
+            self._markets_cache.clear()
+            self._markets_by_slug.clear()
+        else:
+            if self._markets_cache:
+                return list(self._markets_cache.values())
 
-        if await self._hydrate_markets_cache():
-            return list(self._markets_cache.values())
+            if await self._hydrate_markets_cache():
+                return list(self._markets_cache.values())
 
         payload: Any
         if self._sdk_client:
@@ -968,12 +979,26 @@ class PolymarketClient(BasePolymarketClient):
         if token_type == TokenType.NO:
             api_price = 1.0 - price
         api_price = max(0.01, min(0.99, api_price))
+        # Polymarket US orders are denominated in whole contracts. The strategy
+        # layer sometimes emits fractional sizes; round to nearest integer and
+        # warn loudly when we drop more than 5% of the requested size so
+        # operators are not silently trading less than they expected.
+        rounded_quantity = int(max(1, round(size)))
+        size_loss = abs(rounded_quantity - float(size))
+        if float(size) > 0 and size_loss / float(size) > 0.05:
+            logger.warning(
+                "Order size %.4f rounded to %d contracts on %s (delta=%.4f)",
+                float(size),
+                rounded_quantity,
+                market.market_slug or market.market_id,
+                size_loss,
+            )
         payload = {
             "marketSlug": market.market_slug or market.market_id,
             "intent": intent,
             "type": "ORDER_TYPE_LIMIT",
             "price": {"value": f"{api_price:.4f}", "currency": "USD"},
-            "quantity": int(max(1, round(size))),
+            "quantity": rounded_quantity,
             "tif": "TIME_IN_FORCE_GOOD_TILL_CANCEL",
             "manualOrderIndicator": "MANUAL_ORDER_INDICATOR_AUTOMATIC",
         }

@@ -125,3 +125,82 @@ async def test_get_trades_parses_timestamp_and_stable_fallback_id():
     assert trades[0].trade_id
     assert trades[0].market_slug == "event-1"
     assert trades[0].timestamp == datetime(2026, 4, 20, 12, 34, 56)
+
+
+@pytest.mark.asyncio
+async def test_get_account_balances_returns_balances_list():
+    client = PolymarketClient(dry_run=False)
+
+    async def _fake_request(method, endpoint, params=None, json_data=None, use_private=False):
+        assert method == "GET"
+        assert endpoint == "/v1/account/balances"
+        assert use_private is True
+        return {
+            "balances": [
+                {"currency": "USD", "currentBalance": "123.45", "buyingPower": "100.00"}
+            ]
+        }
+
+    client._request = _fake_request  # type: ignore[method-assign]
+    balances = await client.get_account_balances()
+
+    assert len(balances) == 1
+    assert balances[0]["currency"] == "USD"
+
+
+@pytest.mark.asyncio
+async def test_get_portfolio_metrics_combines_positions_activities_and_balances():
+    client = PolymarketClient(dry_run=False)
+
+    async def _fake_request(method, endpoint, params=None, json_data=None, use_private=False):
+        assert method == "GET"
+        assert use_private is True
+        if endpoint == "/v1/portfolio/positions":
+            return {
+                "positions": {
+                    "event-1": {
+                        "netPosition": "10",
+                        "realized": {"value": "2.00", "currency": "USD"},
+                        "cashValue": {"value": "1.25", "currency": "USD"},
+                    }
+                },
+                "eof": True,
+            }
+        if endpoint == "/v1/account/balances":
+            return {
+                "balances": [
+                    {
+                        "currency": "USD",
+                        "currentBalance": 250.0,
+                        "buyingPower": 180.0,
+                        "assetNotional": 80.0,
+                        "assetAvailable": 70.0,
+                        "openOrders": 5.0,
+                    }
+                ]
+            }
+        if endpoint == "/v1/portfolio/activities":
+            return {
+                "activities": [
+                    {
+                        "type": "ACTIVITY_TYPE_TRADE",
+                        "trade": {"realizedPnl": {"value": "1.50", "currency": "USD"}},
+                    },
+                    {
+                        "type": "ACTIVITY_TYPE_TRADE",
+                        "trade": {"realizedPnl": {"value": "-0.50", "currency": "USD"}},
+                    },
+                ]
+            }
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+    client._request = _fake_request  # type: ignore[method-assign]
+    metrics = await client.get_portfolio_metrics(activity_limit=50)
+
+    assert metrics["pnl"]["realized_pnl"] == 2.0
+    assert metrics["pnl"]["unrealized_pnl"] == 1.25
+    assert metrics["pnl"]["total_pnl"] == 3.25
+    assert metrics["balances"]["current_balance"] == 250.0
+    assert metrics["total_exposure"] == 80.0
+    assert metrics["total_trades"] == 2
+    assert metrics["win_rate"] == 0.5

@@ -91,6 +91,7 @@ class Portfolio:
         
         # Current prices for unrealized PnL calculation
         self._current_prices: dict[str, dict[TokenType, float]] = {}
+        self._exchange_metrics: Optional[dict] = None
         
         logger.info(f"Portfolio initialized with balance: {initial_balance}")
     
@@ -301,7 +302,7 @@ class Portfolio:
     
     def get_summary(self) -> dict:
         """Get portfolio summary."""
-        return {
+        summary = {
             "initial_balance": self.initial_balance,
             "cash_balance": self.cash_balance,
             "total_exposure": self.get_total_exposure(),
@@ -314,6 +315,38 @@ class Portfolio:
             ),
             "markets_traded": len(self._positions),
         }
+        if self._exchange_metrics:
+            pnl = self._exchange_metrics.get("pnl")
+            balances = self._exchange_metrics.get("balances")
+            if isinstance(pnl, dict):
+                summary["pnl"] = {
+                    "realized_pnl": float(pnl.get("realized_pnl", summary["pnl"]["realized_pnl"])),
+                    "unrealized_pnl": float(pnl.get("unrealized_pnl", summary["pnl"]["unrealized_pnl"])),
+                    "total_pnl": float(pnl.get("total_pnl", summary["pnl"]["total_pnl"])),
+                    "fees_paid": float(pnl.get("fees_paid", summary["pnl"]["fees_paid"])),
+                    "net_pnl": float(pnl.get("net_pnl", summary["pnl"]["net_pnl"])),
+                }
+            if isinstance(balances, dict):
+                summary["cash_balance"] = float(balances.get("current_balance", summary["cash_balance"]))
+                summary["buying_power"] = float(balances.get("buying_power", 0.0))
+                summary["exchange_balances"] = balances
+            summary["total_exposure"] = float(
+                self._exchange_metrics.get("total_exposure", summary["total_exposure"])
+            )
+            summary["total_trades"] = int(
+                self._exchange_metrics.get("total_trades", summary["total_trades"])
+            )
+            summary["win_rate"] = float(
+                self._exchange_metrics.get("win_rate", summary["win_rate"])
+            )
+            summary["positions_count"] = int(
+                self._exchange_metrics.get("positions_count", summary["positions_count"])
+            )
+            summary["markets_traded"] = int(
+                self._exchange_metrics.get("markets_traded", summary["markets_traded"])
+            )
+            summary["source"] = str(self._exchange_metrics.get("source") or "exchange")
+        return summary
     
     def get_all_positions(self) -> dict[str, dict[TokenType, PortfolioPosition]]:
         """Get all positions."""
@@ -330,5 +363,10 @@ class Portfolio:
         self.cash_balance = self.initial_balance
         self.stats = PortfolioStats()
         self._current_prices = {}
+        self._exchange_metrics = None
         logger.info("Portfolio reset")
+
+    def apply_exchange_metrics(self, metrics: Optional[dict]) -> None:
+        """Attach exchange-reported portfolio metrics for summary display."""
+        self._exchange_metrics = metrics.copy() if isinstance(metrics, dict) else None
 

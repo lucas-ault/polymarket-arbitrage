@@ -77,6 +77,7 @@ class TradingBotWithDashboard:
         self._kalshi_task = None
         self._fill_task = None
         self._live_fill_task = None
+        self._portfolio_sync_task = None
         self._stopping = False
         self._seen_trade_ids: set[str] = set()
     
@@ -140,7 +141,7 @@ class TradingBotWithDashboard:
             # Initialize cross-platform arbitrage engine
             self.cross_platform_engine = CrossPlatformArbEngine(
                 min_edge=self.config.trading.min_edge,
-                polymarket_taker_fee=self.config.trading.taker_fee_bps / 10000,
+                polymarket_fee_theta=self.config.trading.fee_theta_taker,
                 kalshi_taker_fee=self.config.trading.taker_fee_bps / 10000,
                 gas_cost=0.0,
                 match_min_similarity=self.config.mode.min_match_similarity,
@@ -230,6 +231,10 @@ class TradingBotWithDashboard:
             self._live_fill_task = asyncio.create_task(
                 self._poll_live_fills(),
                 name="poll_live_fills",
+            )
+            self._portfolio_sync_task = asyncio.create_task(
+                self._sync_live_portfolio_metrics(),
+                name="sync_live_portfolio_metrics",
             )
         
         # Start the web server
@@ -405,6 +410,28 @@ class TradingBotWithDashboard:
                 break
             except Exception as e:
                 logger.error(f"Live fill poll error: {e}")
+
+    async def _sync_live_portfolio_metrics(self) -> None:
+        """Sync exchange portfolio API metrics into dashboard-visible summary."""
+        if not self.client or not self.portfolio:
+            return
+        while self._running:
+            try:
+                await asyncio.sleep(5.0)
+                metrics = await self.client.get_portfolio_metrics(activity_limit=200)
+                if not metrics:
+                    continue
+                self.portfolio.apply_exchange_metrics(metrics)
+                pnl = metrics.get("pnl") if isinstance(metrics.get("pnl"), dict) else {}
+                if self.risk_manager:
+                    self.risk_manager.update_pnl(
+                        realized_pnl=float(pnl.get("realized_pnl", 0.0)),
+                        unrealized_pnl=float(pnl.get("unrealized_pnl", 0.0)),
+                    )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Portfolio sync error: {e}")
     
     async def _start_kalshi_monitoring(self) -> None:
         """Start monitoring Kalshi markets for cross-platform arbitrage."""
@@ -627,6 +654,7 @@ class TradingBotWithDashboard:
 
         await _cancel_task(self._fill_task, "simulate_fills")
         await _cancel_task(self._live_fill_task, "poll_live_fills")
+        await _cancel_task(self._portfolio_sync_task, "sync_live_portfolio_metrics")
         await _cancel_task(self._kalshi_task, "kalshi_monitoring")
         await _cancel_task(self._matching_task, "market_matching")
 

@@ -20,6 +20,7 @@ from difflib import SequenceMatcher
 from typing import Optional
 
 from polymarket_client.models import Market, OrderBook, Opportunity, OpportunityType
+from utils.polymarket_fees import polymarket_fee
 
 logger = logging.getLogger(__name__)
 
@@ -842,23 +843,27 @@ class CrossPlatformArbEngine:
     def __init__(
         self,
         min_edge: float = 0.02,  # 2% minimum edge
-        polymarket_taker_fee: float = 0.015,  # 1.5%
+        polymarket_taker_fee: float = 0.05,  # legacy alias; theta-based fees are preferred
         kalshi_taker_fee: float = 0.01,  # ~1% estimate
         gas_cost: float = 0.02,  # Gas cost per order
         match_min_similarity: float = 0.5,
+        polymarket_fee_theta: float | None = None,
     ):
         """
         Initialize cross-platform arb engine.
         
         Args:
             min_edge: Minimum edge required (after fees) to signal
-            polymarket_taker_fee: Polymarket taker fee rate
+            polymarket_taker_fee: Legacy Polymarket fee parameter (kept for compatibility)
             kalshi_taker_fee: Kalshi taker fee rate
             gas_cost: Estimated gas cost per order
             match_min_similarity: Similarity threshold for market matching
+            polymarket_fee_theta: Polymarket taker theta (preferred)
         """
         self.min_edge = min_edge
-        self.polymarket_taker_fee = polymarket_taker_fee
+        self.polymarket_fee_theta = float(
+            polymarket_fee_theta if polymarket_fee_theta is not None else polymarket_taker_fee
+        )
         self.kalshi_taker_fee = kalshi_taker_fee
         self.gas_cost = gas_cost
         
@@ -914,9 +919,11 @@ class CrossPlatformArbEngine:
         # 1. Buy YES on Polymarket, sell YES on Kalshi
         if poly_yes_ask and kalshi_yes_bid:
             gross = kalshi_yes_bid - poly_yes_ask
-            fees = (poly_yes_ask * self.polymarket_taker_fee + 
-                    kalshi_yes_bid * self.kalshi_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                polymarket_fee(self.polymarket_fee_theta, 1.0, poly_yes_ask, round_to_cents=False)
+                + kalshi_yes_bid * self.kalshi_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -936,9 +943,11 @@ class CrossPlatformArbEngine:
         # 2. Buy YES on Kalshi, sell YES on Polymarket
         if kalshi_yes_ask and poly_yes_bid:
             gross = poly_yes_bid - kalshi_yes_ask
-            fees = (kalshi_yes_ask * self.kalshi_taker_fee + 
-                    poly_yes_bid * self.polymarket_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                kalshi_yes_ask * self.kalshi_taker_fee
+                + polymarket_fee(self.polymarket_fee_theta, 1.0, poly_yes_bid, round_to_cents=False)
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -958,9 +967,11 @@ class CrossPlatformArbEngine:
         # 3. Buy NO on Polymarket, sell NO on Kalshi
         if poly_no_ask and kalshi_no_bid:
             gross = kalshi_no_bid - poly_no_ask
-            fees = (poly_no_ask * self.polymarket_taker_fee + 
-                    kalshi_no_bid * self.kalshi_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                polymarket_fee(self.polymarket_fee_theta, 1.0, poly_no_ask, round_to_cents=False)
+                + kalshi_no_bid * self.kalshi_taker_fee
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net
@@ -980,9 +991,11 @@ class CrossPlatformArbEngine:
         # 4. Buy NO on Kalshi, sell NO on Polymarket
         if kalshi_no_ask and poly_no_bid:
             gross = poly_no_bid - kalshi_no_ask
-            fees = (kalshi_no_ask * self.kalshi_taker_fee + 
-                    poly_no_bid * self.polymarket_taker_fee + 
-                    self.gas_cost * 2)
+            fees = (
+                kalshi_no_ask * self.kalshi_taker_fee
+                + polymarket_fee(self.polymarket_fee_theta, 1.0, poly_no_bid, round_to_cents=False)
+                + self.gas_cost * 2
+            )
             net = gross - fees
             if net > best_net_edge and net >= self.min_edge:
                 best_net_edge = net

@@ -22,6 +22,7 @@ from polymarket_client.models import (
     Signal,
     TokenType,
 )
+from utils.polymarket_fees import polymarket_fee
 
 
 logger = logging.getLogger(__name__)
@@ -459,8 +460,12 @@ class ArbEngine:
 
     def _estimate_taker_fee(self, price: float) -> float:
         """Estimate per-contract taker fee at a given price."""
-        clamped_price = max(0.0, min(1.0, price))
-        return self.config.fee_theta_taker * clamped_price * (1.0 - clamped_price)
+        return polymarket_fee(
+            theta=self.config.fee_theta_taker,
+            contracts=1.0,
+            price=price,
+            round_to_cents=False,
+        )
     
     def _check_market_making(self, market_id: str, order_book: OrderBook) -> list[Signal]:
         """

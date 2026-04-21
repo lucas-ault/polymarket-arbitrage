@@ -264,3 +264,36 @@ class TestPortfolioSummary:
         assert portfolio.get_total_exposure() == 0.0
         assert portfolio.cash_balance == 10000.0
 
+    def test_summary_uses_exchange_metrics_when_available(self, portfolio: Portfolio):
+        portfolio.apply_exchange_metrics(
+            {
+                "source": "exchange_portfolio_api",
+                "pnl": {
+                    "realized_pnl": 5.0,
+                    "unrealized_pnl": 2.5,
+                    "total_pnl": 7.5,
+                    "fees_paid": 0.0,
+                    "net_pnl": 7.5,
+                },
+                "balances": {
+                    "current_balance": 123.0,
+                    "buying_power": 111.0,
+                },
+                "total_exposure": 42.0,
+                "total_trades": 8,
+                "win_rate": 0.625,
+                "positions_count": 2,
+                "markets_traded": 2,
+            }
+        )
+
+        summary = portfolio.get_summary()
+
+        assert summary["source"] == "exchange_portfolio_api"
+        assert summary["cash_balance"] == 123.0
+        assert summary["buying_power"] == 111.0
+        assert summary["total_exposure"] == 42.0
+        assert summary["total_trades"] == 8
+        assert summary["win_rate"] == 0.625
+        assert summary["pnl"]["total_pnl"] == 7.5
+

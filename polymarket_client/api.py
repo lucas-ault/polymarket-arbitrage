@@ -44,6 +44,7 @@ from polymarket_client.models import (
     Trade,
 )
 from utils.cache_store import CacheStore, NoopCacheStore
+from utils.polymarket_fees import polymarket_fee
 
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,14 @@ class BasePolymarketClient(ABC):
 
     @abstractmethod
     async def get_trades(self, market_id: Optional[str] = None, limit: int = 100) -> list[Trade]:
+        pass
+
+    @abstractmethod
+    async def get_account_balances(self) -> list[dict[str, Any]]:
+        pass
+
+    @abstractmethod
+    async def get_portfolio_metrics(self, activity_limit: int = 200) -> dict[str, Any]:
         pass
 
 
@@ -885,33 +894,43 @@ class PolymarketClient(BasePolymarketClient):
         if self.dry_run:
             return self._simulated_positions.copy()
         try:
-            if self._sdk_client:
-                payload = await self._sdk_client.portfolio.positions()
-            else:
-                payload = await self._request("GET", "/v1/portfolio/positions", use_private=True)
             positions: dict[str, dict[TokenType, Position]] = {}
-            positions_map = payload.get("positions") if isinstance(payload, dict) else None
-            if isinstance(positions_map, dict):
-                iterable = positions_map.items()
-            else:
-                iterable = []
-            for market_slug, item in iterable:
-                if not isinstance(item, dict):
-                    continue
-                market_slug = str(market_slug or item.get("marketSlug") or item.get("slug") or "")
-                market_id = str(item.get("marketId") or item.get("market_id") or market_slug)
-                net = float(item.get("netPosition") or item.get("net_position") or 0.0)
-                if net == 0:
-                    continue
-                token_type = TokenType.YES if net > 0 else TokenType.NO
-                positions.setdefault(market_id, {})[token_type] = Position(
-                    market_id=market_id,
-                    market_slug=market_slug,
-                    token_type=token_type,
-                    size=abs(net),
-                    avg_entry_price=self._amount_value(item.get("cost")) / abs(net) if abs(net) > 0 else 0.0,
-                    realized_pnl=self._amount_value(item.get("realized") or item.get("realizedPnl")),
-                )
+            cursor: Optional[str] = None
+            for _ in range(20):
+                params: dict[str, Any] = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                payload = await self._request("GET", "/v1/portfolio/positions", params=params, use_private=True)
+                positions_map = payload.get("positions") if isinstance(payload, dict) else None
+                if isinstance(positions_map, dict):
+                    iterable = positions_map.items()
+                else:
+                    iterable = []
+                for market_slug, item in iterable:
+                    if not isinstance(item, dict):
+                        continue
+                    market_slug = str(market_slug or item.get("marketSlug") or item.get("slug") or "")
+                    market_id = str(item.get("marketId") or item.get("market_id") or market_slug)
+                    net = float(item.get("netPosition") or item.get("net_position") or 0.0)
+                    if net == 0:
+                        continue
+                    token_type = TokenType.YES if net > 0 else TokenType.NO
+                    positions.setdefault(market_id, {})[token_type] = Position(
+                        market_id=market_id,
+                        market_slug=market_slug,
+                        token_type=token_type,
+                        size=abs(net),
+                        avg_entry_price=self._amount_value(item.get("cost")) / abs(net) if abs(net) > 0 else 0.0,
+                        realized_pnl=self._amount_value(item.get("realized") or item.get("realizedPnl")),
+                    )
+                if not isinstance(payload, dict):
+                    break
+                if bool(payload.get("eof", True)):
+                    break
+                next_cursor = payload.get("nextCursor")
+                if not next_cursor or next_cursor == cursor:
+                    break
+                cursor = str(next_cursor)
             return positions
         except Exception as exc:
             logger.warning("Failed to fetch positions: %s", exc)
@@ -1137,78 +1156,207 @@ class PolymarketClient(BasePolymarketClient):
                 trades = [trade for trade in trades if trade.market_id == market_id]
             return trades
         try:
-            if self._sdk_client:
-                payload = await self._sdk_client.portfolio.activities({"limit": limit})
-            else:
-                payload = await self._request("GET", "/v1/portfolio/activities", params={"limit": limit}, use_private=True)
-            items = self._extract_items(payload, ("activities", "data", "results"))
             trades: list[Trade] = []
-            for item in items:
-                raw_type = str(item.get("type") or "").upper()
-                if raw_type not in {"ACTIVITY_TYPE_TRADE", "TRADE", "FILL", "ORDER_FILL"}:
-                    continue
-                trade_obj = item.get("trade") if isinstance(item.get("trade"), dict) else item
-                market_slug = str(trade_obj.get("marketSlug") or trade_obj.get("market_slug") or "")
-                resolved_market_id = str(trade_obj.get("marketId") or trade_obj.get("market_id") or market_slug)
-                if market_id and resolved_market_id != market_id and market_slug != market_id:
-                    continue
-                intent = str(trade_obj.get("intent") or "")
-                token_type = TokenType.NO if "SHORT" in intent else TokenType.YES
-                side = self._parse_side(trade_obj.get("side") or trade_obj.get("direction"))
-                price = float(
-                    trade_obj.get("price", {}).get("value")
-                    if isinstance(trade_obj.get("price"), dict)
-                    else (trade_obj.get("price") or 0.0)
-                )
-                size = float(trade_obj.get("qty") or trade_obj.get("quantity") or trade_obj.get("size") or 0.0)
-                timestamp = self._parse_timestamp(
-                    trade_obj.get("createdAt"),
-                    trade_obj.get("created_at"),
-                    trade_obj.get("timestamp"),
-                    trade_obj.get("time"),
-                    item.get("createdAt"),
-                    item.get("created_at"),
-                    item.get("timestamp"),
-                    item.get("time"),
-                )
-                trade_id = str(
-                    trade_obj.get("id")
-                    or trade_obj.get("tradeId")
-                    or trade_obj.get("trade_id")
-                    or item.get("id")
-                    or item.get("activityId")
-                    or item.get("activity_id")
-                    or ""
-                )
-                if not trade_id:
-                    order_for_id = str(trade_obj.get("orderId") or trade_obj.get("order_id") or "unknown-order")
-                    ts_ms = int(timestamp.timestamp() * 1000)
-                    trade_id = (
-                        f"{resolved_market_id}:{order_for_id}:{ts_ms}:"
-                        f"{side.value}:{price:.6f}:{size:.6f}"
+            remaining = max(1, limit)
+            cursor: Optional[str] = None
+            page_limit = min(200, remaining)
+            for _ in range(20):
+                params: dict[str, Any] = {"limit": page_limit}
+                if cursor:
+                    params["cursor"] = cursor
+                payload = await self._request("GET", "/v1/portfolio/activities", params=params, use_private=True)
+                items = self._extract_items(payload, ("activities", "data", "results"))
+                for item in items:
+                    raw_type = str(item.get("type") or "").upper()
+                    if raw_type not in {"ACTIVITY_TYPE_TRADE", "TRADE", "FILL", "ORDER_FILL"}:
+                        continue
+                    trade_obj = item.get("trade") if isinstance(item.get("trade"), dict) else item
+                    market_slug = str(trade_obj.get("marketSlug") or trade_obj.get("market_slug") or "")
+                    resolved_market_id = str(trade_obj.get("marketId") or trade_obj.get("market_id") or market_slug)
+                    if market_id and resolved_market_id != market_id and market_slug != market_id:
+                        continue
+                    intent = str(trade_obj.get("intent") or "")
+                    token_type = TokenType.NO if "SHORT" in intent else TokenType.YES
+                    side = self._parse_side(trade_obj.get("side") or trade_obj.get("direction"))
+                    price = float(
+                        trade_obj.get("price", {}).get("value")
+                        if isinstance(trade_obj.get("price"), dict)
+                        else (trade_obj.get("price") or 0.0)
                     )
-                trades.append(
-                    Trade(
-                        trade_id=trade_id,
-                        order_id=str(trade_obj.get("orderId") or trade_obj.get("order_id") or ""),
-                        market_id=resolved_market_id,
-                        market_slug=market_slug,
-                        token_type=token_type,
-                        side=side,
-                        price=price,
-                        size=size,
-                        fee=self._amount_value(trade_obj.get("fee")),
-                        timestamp=timestamp,
+                    size = float(trade_obj.get("qty") or trade_obj.get("quantity") or trade_obj.get("size") or 0.0)
+                    timestamp = self._parse_timestamp(
+                        trade_obj.get("createTime"),
+                        trade_obj.get("updateTime"),
+                        trade_obj.get("createdAt"),
+                        trade_obj.get("created_at"),
+                        trade_obj.get("timestamp"),
+                        trade_obj.get("time"),
+                        item.get("createTime"),
+                        item.get("updateTime"),
+                        item.get("createdAt"),
+                        item.get("created_at"),
+                        item.get("timestamp"),
+                        item.get("time"),
                     )
-                )
-            return trades[-max(1, limit) :]
+                    trade_id = str(
+                        trade_obj.get("id")
+                        or trade_obj.get("tradeId")
+                        or trade_obj.get("trade_id")
+                        or item.get("id")
+                        or item.get("activityId")
+                        or item.get("activity_id")
+                        or ""
+                    )
+                    if not trade_id:
+                        order_for_id = str(trade_obj.get("orderId") or trade_obj.get("order_id") or "unknown-order")
+                        ts_ms = int(timestamp.timestamp() * 1000)
+                        trade_id = (
+                            f"{resolved_market_id}:{order_for_id}:{ts_ms}:"
+                            f"{side.value}:{price:.6f}:{size:.6f}"
+                        )
+                    trades.append(
+                        Trade(
+                            trade_id=trade_id,
+                            order_id=str(trade_obj.get("orderId") or trade_obj.get("order_id") or ""),
+                            market_id=resolved_market_id,
+                            market_slug=market_slug,
+                            token_type=token_type,
+                            side=side,
+                            price=price,
+                            size=size,
+                            fee=self._amount_value(trade_obj.get("fee")),
+                            timestamp=timestamp,
+                        )
+                    )
+                    if len(trades) >= limit:
+                        return trades[:limit]
+                if not isinstance(payload, dict):
+                    break
+                if bool(payload.get("eof", True)):
+                    break
+                next_cursor = payload.get("nextCursor")
+                if not next_cursor or next_cursor == cursor:
+                    break
+                cursor = str(next_cursor)
+                remaining = max(1, limit - len(trades))
+                page_limit = min(200, remaining)
+            return trades[:limit]
         except Exception as exc:
             logger.warning("Failed to fetch trades: %s", exc)
             return []
 
-    def estimate_polymarket_us_fee(self, price: float, contracts: float, is_maker: bool = False) -> float:
+    async def get_account_balances(self) -> list[dict[str, Any]]:
+        if self.dry_run:
+            return []
+        try:
+            payload = await self._request("GET", "/v1/account/balances", use_private=True)
+            items = self._extract_items(payload, ("balances", "data", "results"))
+            return items
+        except Exception as exc:
+            logger.warning("Failed to fetch account balances: %s", exc)
+            return []
+
+    async def get_portfolio_metrics(self, activity_limit: int = 200) -> dict[str, Any]:
+        """Return exchange-reported portfolio metrics for dashboard/risk sync."""
+        if self.dry_run:
+            return {}
+        try:
+            positions_payload = await self._request(
+                "GET",
+                "/v1/portfolio/positions",
+                params={"limit": 200},
+                use_private=True,
+            )
+            balances = await self.get_account_balances()
+            activities_payload = await self._request(
+                "GET",
+                "/v1/portfolio/activities",
+                params={"limit": max(1, min(200, activity_limit))},
+                use_private=True,
+            )
+            positions_map = (
+                positions_payload.get("positions")
+                if isinstance(positions_payload, dict)
+                else {}
+            )
+            if not isinstance(positions_map, dict):
+                positions_map = {}
+            total_realized = 0.0
+            total_unrealized = 0.0
+            positions_count = 0
+            markets_traded = 0
+            for item in positions_map.values():
+                if not isinstance(item, dict):
+                    continue
+                net = float(item.get("netPosition") or item.get("net_position") or 0.0)
+                if net == 0:
+                    continue
+                markets_traded += 1
+                positions_count += 1
+                total_realized += self._amount_value(item.get("realized"))
+                total_unrealized += self._amount_value(item.get("cashValue"))
+
+            activities = self._extract_items(activities_payload, ("activities", "data", "results"))
+            total_trades = 0
+            winning_trades = 0
+            losing_trades = 0
+            for activity in activities:
+                activity_type = str(activity.get("type") or "")
+                if activity_type != "ACTIVITY_TYPE_TRADE":
+                    continue
+                total_trades += 1
+                trade_data = activity.get("trade") if isinstance(activity.get("trade"), dict) else {}
+                realized = self._amount_value(trade_data.get("realizedPnl"))
+                if realized > 0:
+                    winning_trades += 1
+                elif realized < 0:
+                    losing_trades += 1
+
+            primary_balance = balances[0] if balances else {}
+            total_exposure = self._amount_value(primary_balance.get("assetNotional"))
+            win_rate_den = winning_trades + losing_trades
+            win_rate = (winning_trades / win_rate_den) if win_rate_den > 0 else 0.0
+
+            return {
+                "source": "exchange_portfolio_api",
+                "pnl": {
+                    "realized_pnl": total_realized,
+                    "unrealized_pnl": total_unrealized,
+                    "total_pnl": total_realized + total_unrealized,
+                    "fees_paid": 0.0,
+                    "net_pnl": total_realized + total_unrealized,
+                },
+                "balances": {
+                    "current_balance": self._amount_value(primary_balance.get("currentBalance")),
+                    "buying_power": self._amount_value(primary_balance.get("buyingPower")),
+                    "asset_notional": total_exposure,
+                    "asset_available": self._amount_value(primary_balance.get("assetAvailable")),
+                    "open_orders": self._amount_value(primary_balance.get("openOrders")),
+                    "unsettled_funds": self._amount_value(primary_balance.get("unsettledFunds")),
+                    "pending_credit": self._amount_value(primary_balance.get("pendingCredit")),
+                    "margin_requirement": self._amount_value(primary_balance.get("marginRequirement")),
+                    "currency": str(primary_balance.get("currency") or "USD"),
+                    "last_updated": str(primary_balance.get("lastUpdated") or ""),
+                },
+                "total_exposure": total_exposure,
+                "total_trades": total_trades,
+                "win_rate": win_rate,
+                "positions_count": positions_count,
+                "markets_traded": markets_traded,
+            }
+        except Exception as exc:
+            logger.warning("Failed to fetch portfolio metrics: %s", exc)
+            return {}
+
+    def estimate_polymarket_us_fee(
+        self,
+        price: float,
+        contracts: float,
+        is_maker: bool = False,
+        round_to_cents: bool = True,
+    ) -> float:
         theta = -0.0125 if is_maker else 0.05
-        return theta * max(0.0, contracts) * max(0.0, min(1.0, price)) * (1.0 - max(0.0, min(1.0, price)))
+        return polymarket_fee(theta=theta, contracts=contracts, price=price, round_to_cents=round_to_cents)
 
     def simulate_fill(self, order_id: str, fill_size: Optional[float] = None) -> Optional[Trade]:
         if order_id not in self._simulated_orders:

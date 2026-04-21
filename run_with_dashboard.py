@@ -76,7 +76,9 @@ class TradingBotWithDashboard:
         self._server_task = None
         self._kalshi_task = None
         self._fill_task = None
+        self._live_fill_task = None
         self._stopping = False
+        self._seen_trade_ids: set[str] = set()
     
     async def start(self) -> None:
         """Start the bot and dashboard."""
@@ -223,6 +225,12 @@ class TradingBotWithDashboard:
         # Start fill simulation for dry run
         if self.config.is_dry_run and self.config.mode.simulate_fills:
             self._fill_task = asyncio.create_task(self._simulate_fills(), name="simulate_fills")
+        elif not self.config.is_dry_run:
+            # Keep portfolio/risk/dashboard in sync with exchange fills in live mode.
+            self._live_fill_task = asyncio.create_task(
+                self._poll_live_fills(),
+                name="poll_live_fills",
+            )
         
         # Start the web server
         await self._start_server()
@@ -309,6 +317,34 @@ class TradingBotWithDashboard:
                 break
             except Exception as e:
                 logger.error(f"Fill simulation error: {e}")
+
+    async def _poll_live_fills(self) -> None:
+        """Poll recent live trades and propagate new fills through local state."""
+        if not self.client or not self.execution_engine:
+            return
+        while self._running:
+            try:
+                await asyncio.sleep(1.5)
+                trades = await self.client.get_trades(limit=200)
+                if not trades:
+                    continue
+                # Process oldest first so position/PnL updates are monotonic.
+                for trade in sorted(trades, key=lambda t: t.created_at):
+                    if not trade.trade_id or trade.trade_id in self._seen_trade_ids:
+                        continue
+                    self._seen_trade_ids.add(trade.trade_id)
+                    self.execution_engine.handle_fill(trade)
+                    if self.dashboard_integration:
+                        self.dashboard_integration.add_trade(
+                            side=trade.side.value,
+                            price=trade.price,
+                            size=trade.size,
+                            market_id=trade.market_id,
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Live fill poll error: {e}")
     
     async def _start_kalshi_monitoring(self) -> None:
         """Start monitoring Kalshi markets for cross-platform arbitrage."""
@@ -530,6 +566,7 @@ class TradingBotWithDashboard:
                 logger.warning("Error during %s: %s", name, exc)
 
         await _cancel_task(self._fill_task, "simulate_fills")
+        await _cancel_task(self._live_fill_task, "poll_live_fills")
         await _cancel_task(self._kalshi_task, "kalshi_monitoring")
         await _cancel_task(self._matching_task, "market_matching")
 
